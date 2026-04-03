@@ -141,50 +141,92 @@ fn decode_scalar(data: &mut [u8], len: usize) {
 }
 
 // ============================================================================
-// AVX2 SIMD实现（x86_64）
+// AVX2 SIMD实现（x86_64）- 真正的并行查表
 // ============================================================================
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+// ============================================================================
+// 预计算查找表（编译时生成）
+// ============================================================================
+
+#[cfg(target_arch = "x86_64")]
+fn build_shuffle_table(table: &[u8; 256]) -> [__m256i; 16] {
+    unsafe {
+        let mut shuffle_tables = [zeroed_mm256(); 16];
+
+        // 为每个高4位值（0-15）构建一个16字节的shuffle表
+        for hi_nibble in 0..16 {
+            let mut subtable = [0i8; 32];
+
+            // 填充这个高4位对应的所有16个低4位值
+            for lo_nibble in 0..16 {
+                let full_byte = (hi_nibble << 4) | lo_nibble;
+                subtable[lo_nibble] = table[full_byte] as i8;
+                subtable[lo_nibble + 16] = table[full_byte] as i8; // 填充高128位
+            }
+
+            shuffle_tables[hi_nibble as usize] = _mm256_loadu_si256(subtable.as_ptr() as *const __m256i);
+        }
+
+        shuffle_tables
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn zeroed_mm256() -> __m256i {
+    _mm256_setzero_si256()
+}
+
+// 加密查找表（lazy初始化，使用Once保证线程安全）
+#[cfg(target_arch = "x86_64")]
+static ENMAP_SHUFFLE: std::sync::OnceLock<[__m256i; 16]> = std::sync::OnceLock::new();
+
+#[cfg(target_arch = "x86_64")]
+fn get_enmap_shuffle() -> &'static [__m256i; 16] {
+    ENMAP_SHUFFLE.get_or_init(|| build_shuffle_table(&ENMAP))
+}
+
+// 解密查找表（lazy初始化）
+#[cfg(target_arch = "x86_64")]
+static DEMAP_SHUFFLE: std::sync::OnceLock<[__m256i; 16]> = std::sync::OnceLock::new();
+
+#[cfg(target_arch = "x86_64")]
+fn get_demap_shuffle() -> &'static [__m256i; 16] {
+    DEMAP_SHUFFLE.get_or_init(|| build_shuffle_table(&DEMAP))
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn encode_avx2(data: &mut [u8], len: usize) {
-    let enmap: &[u8; 256] = &ENMAP;
+    let shuffle_tables = get_enmap_shuffle();
     let data_ptr = data.as_mut_ptr();
 
     // 处理32字节块
     let mut i = 0;
     while i + 32 <= len {
-        // 加载32字节
-        let chunk = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
+        // 加载32字节输入
+        let input = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
 
-        // 分成两个16字节块处理
-        let lo = _mm256_castsi256_si128(chunk);
-        let hi = _mm256_extracti128_si256(chunk, 1);
+        // 并行查表：高4位选子表，低4位做shuffle索引
+        let result = lookup_256_avx2(input, shuffle_tables);
 
-        // 处理低16字节
-        let result_lo = process_16_bytes_en(lo, enmap);
-
-        // 处理高16字节
-        let result_hi = process_16_bytes_en(hi, enmap);
-
-        // 组合结果：将两个128位结果正确组合成256位
-        let result = _mm256_setr_m128i(result_lo, result_hi);
-
-        // 存储32字节
+        // 存储32字节结果
         _mm256_storeu_si256(data_ptr.add(i) as *mut __m256i, result);
         i += 32;
     }
 
     // 处理16字节块
     while i + 16 <= len {
-        let chunk = _mm_loadu_si128(data_ptr.add(i) as *const __m128i);
-        let result = process_16_bytes_en(chunk, enmap);
+        let input = _mm256_castsi128_si256(_mm_loadu_si128(data_ptr.add(i) as *const __m128i));
+        let result_256 = lookup_256_avx2(input, shuffle_tables);
+        let result = _mm256_castsi256_si128(result_256);
         _mm_storeu_si128(data_ptr.add(i) as *mut __m128i, result);
         i += 16;
     }
 
-    // 处理剩余字节
+    // 处理剩余字节（标量回退）
+    let enmap: &[u8; 256] = &ENMAP;
     while i < len {
         *data_ptr.add(i) = enmap[*data_ptr.add(i) as usize];
         i += 1;
@@ -193,94 +235,69 @@ unsafe fn encode_avx2(data: &mut [u8], len: usize) {
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn decode_avx2(data: &mut [u8], len: usize) {
-    let demap: &[u8; 256] = &DEMAP;
+    let shuffle_tables = get_demap_shuffle();
     let data_ptr = data.as_mut_ptr();
 
     // 处理32字节块
     let mut i = 0;
     while i + 32 <= len {
-        let chunk = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
-        let lo = _mm256_castsi256_si128(chunk);
-        let hi = _mm256_extracti128_si256(chunk, 1);
-
-        let result_lo = process_16_bytes_de(lo, demap);
-        let result_hi = process_16_bytes_de(hi, demap);
-
-        // 组合结果：将两个128位结果正确组合成256位
-        let result = _mm256_setr_m128i(result_lo, result_hi);
-
+        let input = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
+        let result = lookup_256_avx2(input, shuffle_tables);
         _mm256_storeu_si256(data_ptr.add(i) as *mut __m256i, result);
         i += 32;
     }
 
     // 处理16字节块
     while i + 16 <= len {
-        let chunk = _mm_loadu_si128(data_ptr.add(i) as *const __m128i);
-        let result = process_16_bytes_de(chunk, demap);
+        let input = _mm256_castsi128_si256(_mm_loadu_si128(data_ptr.add(i) as *const __m128i));
+        let result_256 = lookup_256_avx2(input, shuffle_tables);
+        let result = _mm256_castsi256_si128(result_256);
         _mm_storeu_si128(data_ptr.add(i) as *mut __m128i, result);
         i += 16;
     }
 
-    // 处理剩余字节
+    // 处理剩余字节（标量回退）
+    let demap: &[u8; 256] = &DEMAP;
     while i < len {
         *data_ptr.add(i) = demap[*data_ptr.add(i) as usize];
         i += 1;
     }
 }
 
-// SIMD辅助函数：并行查找16字节（加密）
+/// 真正的SIMD并行查表：使用_mm256_shuffle_epi8
+///
+/// 算法：
+/// 1. 将256字节表分成16个16字节子表（按输入字节的高4位索引）
+/// 2. 对每个输入字节，高4位决定使用哪个子表
+/// 3. 低4位作为shuffle索引在子表中查找
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn process_16_bytes_en(input: __m128i, table: &[u8; 256]) -> __m128i {
-    // 提取16个字节并查找
-    let b0 = table[_mm_extract_epi8(input, 0) as usize] as i8;
-    let b1 = table[_mm_extract_epi8(input, 1) as usize] as i8;
-    let b2 = table[_mm_extract_epi8(input, 2) as usize] as i8;
-    let b3 = table[_mm_extract_epi8(input, 3) as usize] as i8;
-    let b4 = table[_mm_extract_epi8(input, 4) as usize] as i8;
-    let b5 = table[_mm_extract_epi8(input, 5) as usize] as i8;
-    let b6 = table[_mm_extract_epi8(input, 6) as usize] as i8;
-    let b7 = table[_mm_extract_epi8(input, 7) as usize] as i8;
-    let b8 = table[_mm_extract_epi8(input, 8) as usize] as i8;
-    let b9 = table[_mm_extract_epi8(input, 9) as usize] as i8;
-    let b10 = table[_mm_extract_epi8(input, 10) as usize] as i8;
-    let b11 = table[_mm_extract_epi8(input, 11) as usize] as i8;
-    let b12 = table[_mm_extract_epi8(input, 12) as usize] as i8;
-    let b13 = table[_mm_extract_epi8(input, 13) as usize] as i8;
-    let b14 = table[_mm_extract_epi8(input, 14) as usize] as i8;
-    let b15 = table[_mm_extract_epi8(input, 15) as usize] as i8;
+unsafe fn lookup_256_avx2(input: __m256i, shuffle_tables: &[__m256i; 16]) -> __m256i {
+    // 提取低4位作为shuffle索引（每个字节的低4位）
+    let lo_nibbles = _mm256_and_si256(input, _mm256_set1_epi8(0x0F));
 
-    _mm_setr_epi8(
-        b0, b1, b2, b3, b4, b5, b6, b7,
-        b8, b9, b10, b11, b12, b13, b14, b15,
-    )
-}
+    // 提取高4位用于选择子表
+    let hi_nibbles = _mm256_and_si256(_mm256_srli_epi64(input, 4), _mm256_set1_epi8(0x0F));
 
-// SIMD辅助函数：并行查找16字节（解密）
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn process_16_bytes_de(input: __m128i, table: &[u8; 256]) -> __m128i {
-    let b0 = table[_mm_extract_epi8(input, 0) as usize] as i8;
-    let b1 = table[_mm_extract_epi8(input, 1) as usize] as i8;
-    let b2 = table[_mm_extract_epi8(input, 2) as usize] as i8;
-    let b3 = table[_mm_extract_epi8(input, 3) as usize] as i8;
-    let b4 = table[_mm_extract_epi8(input, 4) as usize] as i8;
-    let b5 = table[_mm_extract_epi8(input, 5) as usize] as i8;
-    let b6 = table[_mm_extract_epi8(input, 6) as usize] as i8;
-    let b7 = table[_mm_extract_epi8(input, 7) as usize] as i8;
-    let b8 = table[_mm_extract_epi8(input, 8) as usize] as i8;
-    let b9 = table[_mm_extract_epi8(input, 9) as usize] as i8;
-    let b10 = table[_mm_extract_epi8(input, 10) as usize] as i8;
-    let b11 = table[_mm_extract_epi8(input, 11) as usize] as i8;
-    let b12 = table[_mm_extract_epi8(input, 12) as usize] as i8;
-    let b13 = table[_mm_extract_epi8(input, 13) as usize] as i8;
-    let b14 = table[_mm_extract_epi8(input, 14) as usize] as i8;
-    let b15 = table[_mm_extract_epi8(input, 15) as usize] as i8;
+    // 使用16个shuffle表并行查表，然后根据高4位blend结果
+    // 对每个可能的hi_nibble值（0-15），先用对应表shuffle，再blend
 
-    _mm_setr_epi8(
-        b0, b1, b2, b3, b4, b5, b6, b7,
-        b8, b9, b10, b11, b12, b13, b14, b15,
-    )
+    // 初始：假设所有字节的高4位都是0
+    let mut result = _mm256_shuffle_epi8(shuffle_tables[0], lo_nibbles);
+
+    // 对每个可能的hi_nibble值，计算mask并blend
+    for hi in 1..16 {
+        // 用对应的表shuffle
+        let shuffled = _mm256_shuffle_epi8(shuffle_tables[hi as usize], lo_nibbles);
+
+        // 创建mask：选择高4位等于hi的字节
+        let mask = _mm256_cmpeq_epi8(hi_nibbles, _mm256_set1_epi8(hi as i8));
+
+        // 根据mask选择
+        result = _mm256_blendv_epi8(result, shuffled, mask);
+    }
+
+    result
 }
 
 // ============================================================================
