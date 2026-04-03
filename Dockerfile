@@ -4,33 +4,34 @@
 # ============================================
 # 阶段1: 构建阶段
 # ============================================
-FROM rust:1.75-slim as builder
+FROM rust:1.75-slim AS builder
 
 WORKDIR /build
 
-# 安装构建依赖
 RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# 1️⃣ 复制 workspace 配置
+# 1️⃣ workspace 配置
 COPY Cargo.toml ./
 
-# 2️⃣ 复制所有子 crate 的 Cargo.toml（关键：只复制 manifest，不复制源码）
+# 2️⃣ 只复制 manifest（缓存关键）
 COPY server/Cargo.toml server/
 COPY shared/Cargo.toml shared/
 
-# 3️⃣ 创建空的源码目录（避免 Cargo 抱怨缺失目录）
-RUN mkdir -p server/src shared/src
+# 3️⃣ dummy src（关键修复点）
+RUN mkdir -p server/src shared/src \
+ && echo "fn main() {}" > server/src/main.rs \
+ && echo "" > shared/src/lib.rs
 
-# 4️⃣ 预下载依赖（利用 Docker 缓存层）
+# 4️⃣ 缓存依赖
 RUN cargo fetch
 
-# 5️⃣ 复制完整源码
-COPY shared/src shared/src
+# 5️⃣ 覆盖真实源码
 COPY server/src server/src
+COPY shared/src shared/src
 
-# 6️⃣ 编译 server
+# 6️⃣ 编译
 RUN cargo build --release -p server
 
 # ============================================
