@@ -13,16 +13,24 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制 Cargo 配置
+# 1️⃣ 复制 workspace 配置
 COPY Cargo.toml ./
 
-# 复制 shared 库源码
-COPY shared/ shared/
+# 2️⃣ 复制所有子 crate 的 Cargo.toml（关键：只复制 manifest，不复制源码）
+COPY server/Cargo.toml server/
+COPY shared/Cargo.toml shared/
 
-# 复制 server 源码
-COPY server/ server/
+# 3️⃣ 创建空的源码目录（避免 Cargo 抱怨缺失目录）
+RUN mkdir -p server/src shared/src
 
-# 使用静态链接编译
+# 4️⃣ 预下载依赖（利用 Docker 缓存层）
+RUN cargo fetch
+
+# 5️⃣ 复制完整源码
+COPY shared/src shared/src
+COPY server/src server/src
+
+# 6️⃣ 编译 server
 RUN cargo build --release -p server
 
 # ============================================
