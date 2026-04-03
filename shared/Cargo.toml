@@ -24,10 +24,3 @@ rand = { workspace = true }
 # 工具
 regex = { workspace = true }
 url = { workspace = true }
-
-[dev-dependencies]
-criterion = "0.5"
-
-[[bench]]
-name = "king_benchmark"
-harness = false
