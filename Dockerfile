@@ -4,7 +4,7 @@
 # ============================================
 # 阶段1: 构建阶段
 # ============================================
-FROM rust:1.75-slim AS builder
+FROM rust:latest AS builder
 
 WORKDIR /build
 
