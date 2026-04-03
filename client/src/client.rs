@@ -15,7 +15,6 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::BytesMut;
 
 /// SOCKS5代理客户端
 pub struct ProxyClient {
@@ -92,17 +91,6 @@ async fn handle_local_connection(
     };
 
     info!("🎯 收到SOCKS5请求: {:?}", target_addr);
-
-    // 步骤2.5: 强制使用域名模式
-    // 检查地址类型，如果是IPv4/IPv6，拒绝并要求使用域名
-    let target_addr = match enforce_domain_usage(&target_addr, &mut local_stream).await? {
-        Some(addr) => addr,
-        None => {
-            // 已经发送错误响应，连接已关闭
-            return Ok(());
-        }
-    };
-
     info!("🎯 最终连接到: {:?}", target_addr);
 
     // 步骤3: 连接到远程服务端
@@ -375,122 +363,4 @@ async fn relay_with_encryption(
     }
 
     Ok(())
-}
-
-/// 强制客户端使用域名而不是IP
-///
-/// SOCKS5协议支持域名类型(0x03)，但大多数浏览器默认发送IP
-/// 我们通过拒绝IP请求并返回特定错误码来强制使用域名
-///
-/// 注意：由于浏览器通常不会重新发送域名请求，
-/// 所以我们同时提供反向DNS解析作为备选方案
-async fn enforce_domain_usage(
-    target_addr: &shared::TargetAddr,
-    stream: &mut TcpStream,
-) -> anyhow::Result<Option<shared::TargetAddr>> {
-    use shared::TargetAddr;
-
-    match target_addr {
-        TargetAddr::Domain(_, _) => {
-            // 已经是域名，直接使用
-            Ok(Some(target_addr.clone()))
-        }
-        TargetAddr::Ipv4(ip, port) => {
-            // IPv4地址，尝试反向解析
-            info!("⚠️  收到IPv4请求: {}:{}, 尝试反向解析", ip, port);
-
-            match reverse_lookup_ipv4(ip).await {
-                Some(domain) => {
-                    info!("✅ 反向解析成功: {} -> {}, 使用域名", ip, domain);
-                    Ok(Some(TargetAddr::Domain(domain, *port)))
-                }
-                None => {
-                    info!("⚠️  反向解析失败，使用原始IP地址");
-                    // 发送警告日志但不拒绝连接（兼容性考虑）
-                    Ok(Some(target_addr.clone()))
-                }
-            }
-        }
-        TargetAddr::Ipv6(ip, port) => {
-            info!("⚠️  收到IPv6请求: {}:{}, 尝试反向解析", ip, port);
-
-            match reverse_lookup_ipv6(ip).await {
-                Some(domain) => {
-                    info!("✅ 反向解析成功: {} -> {}, 使用域名", ip, domain);
-                    Ok(Some(TargetAddr::Domain(domain, *port)))
-                }
-                None => {
-                    info!("⚠️  反向解析失败，使用原始IP地址");
-                    Ok(Some(target_addr.clone()))
-                }
-            }
-        }
-    }
-}
-
-/// IPv4反向DNS查询（纯动态，无预定义映射）
-async fn reverse_lookup_ipv4(ip: &std::net::Ipv4Addr) -> Option<String> {
-    // 直接进行动态反向查询
-    let ip_str = format!("{}", ip);
-    match tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        tokio::task::spawn_blocking({
-            let ip_str = ip_str.clone();
-            move || {
-                // 使用host命令进行反向查询
-                match std::process::Command::new("host")
-                    .arg(&ip_str)
-                    .output()
-                {
-                    Ok(output) => {
-                        let output = String::from_utf8_lossy(&output.stdout);
-                        // 解析输出: "1.2.3.4.in-addr.arpa domain name pointer www.example.com."
-                        // 或: "4.3.2.1.in-addr.arpa domain name pointer www.example.com.\n"
-                        for line in output.lines() {
-                            if line.contains("pointer") || line.contains("PTR") {
-                                // 尝试多种分割方式
-                                if let Some(part) = line.split("pointer").nth(1) {
-                                    let domain = part.trim().trim_end_matches('.');
-                                    if !domain.is_empty()
-                                        && !domain.contains("in-addr.arpa")
-                                        && domain.contains('.') {
-                                        return Some(domain.to_string());
-                                    }
-                                } else if let Some(part) = line.split("PTR").nth(1) {
-                                    let domain = part.trim().trim_end_matches('.');
-                                    if !domain.is_empty()
-                                        && !domain.contains("in-addr.arpa")
-                                        && domain.contains('.') {
-                                        return Some(domain.to_string());
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    }
-                    Err(_) => None,
-                }
-            }
-        })
-    ).await {
-        Ok(Ok(result)) => {
-            if let Some(ref domain) = result {
-                info!("🔍 动态反向解析成功: {} -> {}", ip, domain);
-            }
-            result
-        }
-        Ok(Err(_)) => {
-            debug!("🔍 动态反向解析失败: {}", ip);
-            None
-        }
-        Err(_) => {
-            debug!("🔍 动态反向解析超时: {}", ip);
-            None
-        }
-    }
-}
-
-/// IPv6反向DNS查询（暂不支持）
-async fn reverse_lookup_ipv6(_ip: &std::net::Ipv6Addr) -> Option<String> {
-    None
 }
