@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制 Cargo 配置
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 # 复制 shared 库源码
 COPY shared/ shared/
