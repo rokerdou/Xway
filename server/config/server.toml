@@ -1,0 +1,21 @@
+# 服务端配置
+
+[server]
+listen_addr = "0.0.0.0"
+listen_port = 1080
+max_connections = 1000
+timeout_seconds = 300
+
+[logging]
+level = "info"
+log_dir = "./logs"
+max_log_files = 7
+
+[security]
+enable_auth = false
+# username = "admin"
+# password = "password"
+
+[relay]
+max_buffer_size = 8192
+enable_traffic_stats = true

@@ -1,0 +1,48 @@
+[workspace]
+members = ["server", "client", "shared"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["doujia"]
+license = "MIT"
+
+[workspace.dependencies]
+# 异步运行时
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 配置
+config = "0.14"
+toml = "0.8"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# 错误处理
+thiserror = "1.0"
+anyhow = "1.0"
+
+# 网络
+bytes = "1.5"
+
+# 加密
+aes-gcm = "0.10"
+rand = "0.8"
+
+# 测试
+criterion = "0.5"
+
+# 工具
+regex = "1.10"
+url = "2.5"
+
+# GUI (客户端)
+tauri = { version = "2.0", features = [] }

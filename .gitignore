@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+**/*.rs.bk
+**/*.rlib
+**/*.rmeta
+ Cargo.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Test
+/tmp/
+*.html

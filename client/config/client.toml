@@ -1,0 +1,18 @@
+# 客户端配置
+
+[server]
+remote_server = "127.0.0.1"
+remote_port = 1080
+
+[local]
+listen_addr = "127.0.0.1"
+listen_port = 1081
+
+[logging]
+level = "debug"
+log_dir = "./logs"
+
+[security]
+# 认证信息（如果服务端启用）
+# username = "user"
+# password = "pass"

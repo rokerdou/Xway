@@ -1,0 +1,36 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# 共享库
+shared = { path = "../shared" }
+
+# 异步运行时
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# 序列化
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# 配置
+config = { workspace = true }
+toml = { workspace = true }
+
+# 日志
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# 错误处理
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# 网络
+bytes = { workspace = true }
+
+# GUI (暂时注释，等Tauri集成时再启用)
+# tauri = { workspace = true }
