@@ -36,8 +36,8 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建非 root 用户
-RUN useradd -m -u 1000 -s /bin/bash proxy
+# 创建非 root 用户（如果不存在）
+RUN id -u proxy >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash proxy
 
 # 创建应用目录
 WORKDIR /app
