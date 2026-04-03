@@ -292,6 +292,8 @@ async fn relay_with_encryption(
     // 本地 -> 远程（加密）
     let l2r = async move {
         let mut buffer = vec![0u8; 8192];
+        // 优化：预分配加密缓冲区，避免每次循环都to_vec()
+        let mut data = Vec::with_capacity(8192);
 
         loop {
             let n = local_reader.read(&mut buffer).await?;
@@ -301,8 +303,12 @@ async fn relay_with_encryption(
 
             debug!("本地->远程: {} 字节", n);
 
+            // 优化：重用加密缓冲区
+            data.clear();
+            data.resize(n, 0);
+            data.copy_from_slice(&buffer[..n]);
+
             // 加密数据
-            let mut data = buffer[..n].to_vec();
             local_encryptor.encode(&mut data, n)?;
 
             // 发送到远程（需要添加长度前缀）
@@ -317,6 +323,8 @@ async fn relay_with_encryption(
     // 远程 -> 本地（解密）
     let r2l = async move {
         let mut len_buffer = [0u8; 2];
+        // 优化：预分配缓冲区，重用内存减少分配次数
+        let mut buffer = Vec::with_capacity(8192);
 
         loop {
             // 读取数据长度
@@ -326,8 +334,11 @@ async fn relay_with_encryption(
             }
             let len = u16::from_be_bytes(len_buffer) as usize;
 
+            // 优化：重用缓冲区，resize在capacity足够时不会重新分配
+            buffer.clear();
+            buffer.resize(len, 0);
+
             // 读取加密数据
-            let mut buffer = vec![0u8; len];
             match remote_reader.read_exact(&mut buffer).await {
                 Ok(_) => {}
                 Err(_) => break,

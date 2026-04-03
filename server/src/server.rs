@@ -13,7 +13,6 @@ use tracing::{info, error, debug};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::BytesMut;
 
 /// SOCKS5代理服务端
 pub struct ProxyServer {
@@ -199,6 +198,8 @@ async fn relay_with_encryption(
     // 客户端 -> 目标（解密）
     let c2t = async move {
         let mut len_buffer = [0u8; 2];
+        // 优化：在循环外预分配缓冲区，重用内存减少分配次数
+        let mut buffer = Vec::with_capacity(buffer_size);
 
         loop {
             // 读取加密数据长度
@@ -209,8 +210,11 @@ async fn relay_with_encryption(
 
             let len = u16::from_be_bytes(len_buffer) as usize;
 
+            // 优化：重用缓冲区，resize在capacity足够时不会重新分配
+            buffer.clear();
+            buffer.resize(len, 0);
+
             // 读取加密数据
-            let mut buffer = vec![0u8; len];
             if client_reader.read_exact(&mut buffer).await.is_err() {
                 break;
             }
