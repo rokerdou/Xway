@@ -12,37 +12,28 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# 1️⃣ workspace 配置（精简版，只包含 server + shared）
+# ✅ 使用原始 workspace（最关键）
 COPY Cargo.toml ./
-RUN printf '\
-[workspace]\n\
-members=["server","shared"]\n\
-resolver="2"\n\
-\n\
-[workspace.package]\n\
-version="0.1.0"\n\
-edition="2021"\n\
-authors=["doujia"]\n\
-license="MIT"\n\
-' > Cargo.toml
 
-# 2️⃣ 只复制 manifest（缓存关键）
+# 所有 crate 的 manifest
 COPY server/Cargo.toml server/
 COPY shared/Cargo.toml shared/
+COPY client/Cargo.toml client/
 
-# 3️⃣ dummy src（关键修复点）
-RUN mkdir -p server/src shared/src \
+# dummy src（全部）
+RUN mkdir -p server/src shared/src client/src \
  && echo "fn main() {}" > server/src/main.rs \
- && echo "" > shared/src/lib.rs
+ && echo "" > shared/src/lib.rs \
+ && echo "fn main() {}" > client/src/main.rs
 
-# 4️⃣ 缓存依赖（精简 workspace，不下载 client 依赖）
+# 缓存依赖
 RUN cargo fetch
 
-# 5️⃣ 覆盖真实源码
+# 覆盖真实源码（只复制需要的）
 COPY server/src server/src
 COPY shared/src shared/src
 
-# 6️⃣ 编译
+# 编译 server（不编译 client）
 RUN cargo build --release -p server
 
 # ============================================
