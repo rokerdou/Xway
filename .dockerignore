@@ -3,7 +3,11 @@ target/
 Cargo.lock
 
 # 客户端相关（服务端不需要）
-client/
+# 保留 client/Cargo.toml 供 workspace 使用
+client/src/
+client/ui/
+client/src-tauri/
+client/target/
 src-tauri/
 ui/
 
