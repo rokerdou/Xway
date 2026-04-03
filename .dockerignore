@@ -1,0 +1,51 @@
+# Rust 构建产物
+target/
+Cargo.lock
+
+# 客户端相关（服务端不需要）
+client/
+src-tauri/
+ui/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 日志
+*.log
+
+# Git
+.git/
+.gitignore
+.github/
+
+# 文档（不需要打包到镜像）
+*.md
+!README.md
+
+# 测试
+tests/
+test_*.sh
+tmp/
+
+# Docker 相关（避免递归）
+docker-compose.yml
+.dockerignore
+server/Dockerfile
+server/.dockerignore
+
+# 部署脚本
+*.sh
+!entrypoint.sh
+
+# 其他
+.DS_Store
+*.bak
