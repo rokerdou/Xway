@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# 1️⃣ workspace 配置
+# 1️⃣ workspace 配置（精简版，只包含 server + shared）
 COPY Cargo.toml ./
+RUN printf '[workspace]\nmembers=["server","shared"]\nresolver="2"\n' > Cargo.toml
 
 # 2️⃣ 只复制 manifest（缓存关键）
 COPY server/Cargo.toml server/
@@ -24,7 +25,7 @@ RUN mkdir -p server/src shared/src \
  && echo "fn main() {}" > server/src/main.rs \
  && echo "" > shared/src/lib.rs
 
-# 4️⃣ 缓存依赖
+# 4️⃣ 缓存依赖（精简 workspace，不下载 client 依赖）
 RUN cargo fetch
 
 # 5️⃣ 覆盖真实源码
