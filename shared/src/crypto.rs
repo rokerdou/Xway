@@ -46,9 +46,9 @@ impl KingObj {
             ));
         }
 
-        for i in 0..len {
-            let encrypted = ENMAP[data[i] as usize];
-            data[i] = encrypted;
+        // 简洁的迭代器实现，编译器优化效果好
+        for byte in data[..len].iter_mut() {
+            *byte = ENMAP[*byte as usize];
         }
 
         self.encode_index = (self.encode_index + len) % 256;
@@ -62,9 +62,9 @@ impl KingObj {
             ));
         }
 
-        for i in 0..len {
-            let decrypted = DEMAP[data[i] as usize];
-            data[i] = decrypted;
+        // 简洁的迭代器实现，编译器优化效果好
+        for byte in data[..len].iter_mut() {
+            *byte = DEMAP[*byte as usize];
         }
 
         self.decode_index = (self.decode_index + len) % 256;
