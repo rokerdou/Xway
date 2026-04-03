@@ -14,7 +14,17 @@ RUN apt-get update && apt-get install -y \
 
 # 1️⃣ workspace 配置（精简版，只包含 server + shared）
 COPY Cargo.toml ./
-RUN printf '[workspace]\nmembers=["server","shared"]\nresolver="2"\n' > Cargo.toml
+RUN printf '\
+[workspace]\n\
+members=["server","shared"]\n\
+resolver="2"\n\
+\n\
+[workspace.package]\n\
+version="0.1.0"\n\
+edition="2021"\n\
+authors=["doujia"]\n\
+license="MIT"\n\
+' > Cargo.toml
 
 # 2️⃣ 只复制 manifest（缓存关键）
 COPY server/Cargo.toml server/
