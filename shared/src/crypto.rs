@@ -270,31 +270,45 @@ unsafe fn decode_avx2(data: &mut [u8], len: usize) {
 /// 1. 将256字节表分成16个16字节子表（按输入字节的高4位索引）
 /// 2. 对每个输入字节，高4位决定使用哪个子表
 /// 3. 低4位作为shuffle索引在子表中查找
+///
+/// 性能优化：
+/// - 使用_epi16移位适合8位字节数据
+/// - 纯逻辑运算（OR+AND）替代条件选择（blendv）
+/// - 从0开始OR累加，避免特殊处理
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn lookup_256_avx2(input: __m256i, shuffle_tables: &[__m256i; 16]) -> __m256i {
+unsafe fn lookup_256_avx2(input: __m256i, table: &[__m256i; 16]) -> __m256i {
     // 提取低4位作为shuffle索引（每个字节的低4位）
-    let lo_nibbles = _mm256_and_si256(input, _mm256_set1_epi8(0x0F));
+    let lo = _mm256_and_si256(input, _mm256_set1_epi8(0x0F));
 
-    // 提取高4位用于选择子表
-    let hi_nibbles = _mm256_and_si256(_mm256_srli_epi64(input, 4), _mm256_set1_epi8(0x0F));
+    // 提取高4位（决定选择哪个子表）
+    // 使用16位右移，更适合8位字节数据处理
+    let hi = _mm256_and_si256(
+        _mm256_srli_epi16(input, 4),
+        _mm256_set1_epi8(0x0F),
+    );
 
-    // 使用16个shuffle表并行查表，然后根据高4位blend结果
-    // 对每个可能的hi_nibble值（0-15），先用对应表shuffle，再blend
+    // 从0开始，通过OR累加16个masked结果
+    let mut result = _mm256_setzero_si256();
 
-    // 初始：假设所有字节的高4位都是0
-    let mut result = _mm256_shuffle_epi8(shuffle_tables[0], lo_nibbles);
+    // 16路并行"选择"（关键优化点）
+    // 对每个可能的hi值（0-15）：
+    // 1. 生成mask：标记哪些字节的高4位等于当前hi值
+    // 2. shuffle：用对应的子表查表
+    // 3. AND+OR：将masked的查表结果OR到最终结果
+    for i in 0..16 {
+        // 创建mask：选择高4位等于i的字节
+        let mask = _mm256_cmpeq_epi8(hi, _mm256_set1_epi8(i as i8));
 
-    // 对每个可能的hi_nibble值，计算mask并blend
-    for hi in 1..16 {
-        // 用对应的表shuffle
-        let shuffled = _mm256_shuffle_epi8(shuffle_tables[hi as usize], lo_nibbles);
+        // 用对应的表shuffle（并行查表）
+        let shuffled = _mm256_shuffle_epi8(table[i], lo);
 
-        // 创建mask：选择高4位等于hi的字节
-        let mask = _mm256_cmpeq_epi8(hi_nibbles, _mm256_set1_epi8(hi as i8));
-
-        // 根据mask选择
-        result = _mm256_blendv_epi8(result, shuffled, mask);
+        // 纯逻辑运算：result | (shuffled & mask)
+        // 只保留高4位匹配的字节的查表结果
+        result = _mm256_or_si256(
+            result,
+            _mm256_and_si256(shuffled, mask),
+        );
     }
 
     result
