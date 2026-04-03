@@ -185,6 +185,16 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
     // 根据地址类型读取剩余数据
     let addr_type = header[3];
 
+    debug!("📋 SOCKS5请求地址类型: 0x{:02X} ({})",
+        addr_type,
+        match addr_type {
+            0x01 => "IPv4",
+            0x03 => "域名",
+            0x04 => "IPv6",
+            _ => "未知",
+        }
+    );
+
     match addr_type {
         0x01 => {
             // IPv4: 4字节IP + 2字节端口
@@ -196,6 +206,7 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
             full_buffer[4..10].copy_from_slice(&addr_buffer);
 
             let request = Request::decode(&mut full_buffer.as_ref())?;
+            debug!("🔴 收到IPv4地址: {:?}", request.dest_addr);
             Ok(request.dest_addr)
         }
         0x03 => {
@@ -213,6 +224,7 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
             full_buffer.extend_from_slice(&domain_buffer);
 
             let request = Request::decode(&mut full_buffer.as_slice())?;
+            debug!("🟢 收到域名地址: {:?}", request.dest_addr);
             Ok(request.dest_addr)
         }
         0x04 => {
@@ -416,47 +428,35 @@ async fn enforce_domain_usage(
     }
 }
 
-/// IPv4反向DNS查询
+/// IPv4反向DNS查询（纯动态，无预定义映射）
 async fn reverse_lookup_ipv4(ip: &std::net::Ipv4Addr) -> Option<String> {
-    use std::net::Ipv4Addr;
-
-    // 常见网站的预定义映射（快速路径）
-    let known_domains: [(Ipv4Addr, &str); 7] = [
-        (Ipv4Addr::new(157, 240, 7, 20), "www.google.com"),
-        (Ipv4Addr::new(142, 250, 185, 115), "www.baidu.com"),
-        (Ipv4Addr::new(103, 235, 46, 115), "www.baidu.com"),
-        (Ipv4Addr::new(180, 101, 49, 44), "www.baidu.com"),
-        (Ipv4Addr::new(185, 45, 5, 35), "www.cloudflare.com"),
-        (Ipv4Addr::new(172, 217, 174, 88), "www.google.com"),
-        (Ipv4Addr::new(142, 250, 188, 115), "www.baidu.com"),
-    ];
-
-    for &(known_ip, domain) in known_domains.iter() {
-        if ip == &known_ip {
-            return Some(domain.to_string());
-        }
-    }
-
-    // 动态反向查询
+    // 直接进行动态反向查询
     let ip_str = format!("{}", ip);
     match tokio::time::timeout(
-        tokio::time::Duration::from_millis(300),
+        tokio::time::Duration::from_millis(500),
         tokio::task::spawn_blocking({
             let ip_str = ip_str.clone();
             move || {
                 // 使用host命令进行反向查询
                 match std::process::Command::new("host")
-                    .arg("-W") // 超时1秒
-                    .arg("1")
                     .arg(&ip_str)
                     .output()
                 {
                     Ok(output) => {
                         let output = String::from_utf8_lossy(&output.stdout);
                         // 解析输出: "1.2.3.4.in-addr.arpa domain name pointer www.example.com."
+                        // 或: "4.3.2.1.in-addr.arpa domain name pointer www.example.com.\n"
                         for line in output.lines() {
-                            if line.contains("pointer") {
+                            if line.contains("pointer") || line.contains("PTR") {
+                                // 尝试多种分割方式
                                 if let Some(part) = line.split("pointer").nth(1) {
+                                    let domain = part.trim().trim_end_matches('.');
+                                    if !domain.is_empty()
+                                        && !domain.contains("in-addr.arpa")
+                                        && domain.contains('.') {
+                                        return Some(domain.to_string());
+                                    }
+                                } else if let Some(part) = line.split("PTR").nth(1) {
                                     let domain = part.trim().trim_end_matches('.');
                                     if !domain.is_empty()
                                         && !domain.contains("in-addr.arpa")
@@ -473,8 +473,20 @@ async fn reverse_lookup_ipv4(ip: &std::net::Ipv4Addr) -> Option<String> {
             }
         })
     ).await {
-        Ok(Ok(result)) => result,
-        _ => None,
+        Ok(Ok(result)) => {
+            if let Some(ref domain) = result {
+                info!("🔍 动态反向解析成功: {} -> {}", ip, domain);
+            }
+            result
+        }
+        Ok(Err(_)) => {
+            debug!("🔍 动态反向解析失败: {}", ip);
+            None
+        }
+        Err(_) => {
+            debug!("🔍 动态反向解析超时: {}", ip);
+            None
+        }
     }
 }
 
