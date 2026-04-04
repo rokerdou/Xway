@@ -12,6 +12,7 @@ mod server;
 use anyhow::Result;
 use tracing::{info, error};
 use tracing_subscriber;
+use std::path::Path;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,14 +23,24 @@ async fn main() -> Result<()> {
 
     info!("🚀 SOCKS5代理服务端启动中...");
 
+    // 解析命令行参数
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() >= 3 && args[1] == "--config" {
+        // 使用命令行指定的配置文件
+        args[2].clone()
+    } else {
+        // 使用默认路径
+        "config/server.toml".to_string()
+    };
+
     // 加载配置
-    let config = match config::ServerConfig::from_file("config/server.toml") {
+    let config = match config::ServerConfig::from_file(&config_path) {
         Ok(cfg) => {
-            info!("⚙️  配置加载成功");
+            info!("⚙️  配置加载成功: {}", config_path);
             cfg
         }
         Err(e) => {
-            info!("⚠️  无法加载配置文件，使用默认配置: {}", e);
+            info!("⚠️  无法加载配置文件 ({}), 使用默认配置: {}", config_path, e);
             config::ServerConfig::default_config()
         }
     };
