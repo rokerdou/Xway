@@ -56,8 +56,8 @@ WORKDIR /app
 # 从构建阶段复制二进制文件
 COPY --from=builder /build/target/release/server /app/server
 
-# 复制服务端配置文件
-COPY --from=builder /build/server/config/server.toml /app/server.toml
+# 复制服务端配置文件（直接从本地复制）
+COPY server/config/server.toml /app/server.toml
 
 # 更改所有权
 RUN chown -R proxy:proxy /app
