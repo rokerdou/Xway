@@ -488,14 +488,13 @@ pub fn run() {
 
             app.manage(state);
 
-            // 创建系统托盘（同步创建，避免时序问题）
+            // 创建系统托盘
             #[cfg(desktop)]
             {
-                let app_handle = app.handle().clone();
-                // 使用 block_on 在当前上下文中同步创建托盘
-                tauri::async_runtime::block_on(async move {
-                    create_tray(app_handle).await;
-                });
+                let app_handle = app.handle();
+                if let Err(e) = create_tray(app_handle) {
+                    tracing::error!("❌ 创建托盘失败: {}", e);
+                }
                 tracing::info!("🎯 主窗口应该已经创建");
             }
 
@@ -522,75 +521,57 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// 创建系统托盘
+/// 创建系统托盘（使用 Tauri v2 内置 API）
 #[cfg(desktop)]
-async fn create_tray(app: tauri::AppHandle) {
-    use tray_icon::{
-        TrayIconBuilder,
+fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::{
         menu::{Menu, MenuItem},
-        Icon,
+        tray::TrayIconBuilder,
     };
 
-    // 使用 image crate 加载并解码 PNG 图标
-    let icon_bytes = include_bytes!("../icons/32x32.png");
-    let img = image::load_from_memory(icon_bytes).expect("解码图标失败");
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    let icon = Icon::from_rgba(rgba.into_raw(), width, height).expect("创建图标失败");
+    // 创建菜单项
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit_item])?;
 
-    tracing::info!("🔍 托盘图标尺寸: {}x{}", width, height);
+    // 创建托盘图标
+    let _tray = TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .show_menu_on_left_click(false)  // 左键点击不显示菜单，改为触发事件
+        .tooltip("SOCKS5 代理客户端")
+        .on_menu_event(|app: &tauri::AppHandle, event: tauri::menu::MenuEvent| match event.id.as_ref() {
+            "quit" => {
+                tracing::info!("📋 点击退出菜单");
+                let _ = app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray: &tauri::tray::TrayIcon<_>, event: tauri::tray::TrayIconEvent| {
+            tracing::info!("🖱️ 托盘图标事件: {:?}", event);
 
-    // 创建菜单
-    let quit_item = MenuItem::new("退出", true, None);
-    let menu = Menu::new();
-    let _ = menu.append(&quit_item);
-
-    // 创建托盘图标并添加菜单
-    let tray = TrayIconBuilder::new()
-        .with_icon(icon)
-        .with_icon_as_template(false)  // 不使用 template 模式，保持原色
-        .with_menu(Box::new(menu))  // 添加菜单到托盘图标
-        .with_tooltip("SOCKS5 代理客户端")
-        .build();
-
-    match tray {
-        Ok(_) => tracing::info!("✅ 系统托盘已创建"),
-        Err(e) => tracing::error!("❌ 创建托盘图标失败: {}", e),
-    }
-
-    // 设置托盘图标点击事件处理
-    let app_handle_for_click = app.clone();
-    let _ = tray_icon::TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| {
-        tracing::info!("🖱️ 托盘图标事件: {:?}", event);
-
-        // 单击托盘图标：显示/隐藏窗口
-        if let Some(window) = app_handle_for_click.get_webview_window("main") {
-            match event {
-                tray_icon::TrayIconEvent::Click { .. } => {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
+            let app = tray.app_handle();
+            if let Some(window) = app.get_webview_window("main") {
+                match event {
+                    tauri::tray::TrayIconEvent::Click { .. } => {
+                        // 单击：显示/隐藏窗口
+                        if window.is_visible().unwrap_or(false) {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    tauri::tray::TrayIconEvent::DoubleClick { .. } => {
+                        // 双击：显示并聚焦窗口
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
+                    _ => {}
                 }
-                tray_icon::TrayIconEvent::DoubleClick { .. } => {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                _ => {}
             }
-        }
-    }));
+        })
+        .build(app)?;
 
-    // 设置菜单事件处理
-    let app_handle_for_menu = app.clone();
-    let _ = tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
-        tracing::info!("📋 菜单事件: {:?}", event);
-
-        if event.id.0 == "退出" {
-            // 退出应用
-            let _ = app_handle_for_menu.exit(0);
-        }
-    }));
+    tracing::info!("✅ 系统托盘已创建（使用 Tauri v2 API）");
+    Ok(())
 }
