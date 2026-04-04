@@ -42,6 +42,7 @@
     "tray-icon": {
       "iconPath": "icons/icon@2xTemplate.png",
       "iconAsTemplate": true
-    }
+    },
+    "clipboard-manager": null
   }
 }

@@ -357,10 +357,10 @@ async fn set_system_proxy(enabled: bool, port: u16) -> Result<String, String> {
 #[tauri::command]
 async fn get_proxy_env_vars(port: u16) -> Result<String, String> {
     let vars = format!(
-r#"export all_proxy="socks5://127.0.0.1:{}"
-export http_proxy="socks5://127.0.0.1:{}"
-export https_proxy="socks5://127.0.0.1:{}"
-export no_proxy="localhost,127.0.0.1,::1"#,
+        "export all_proxy=\"socks5://127.0.0.1:{}\"\n\
+         export http_proxy=\"socks5://127.0.0.1:{}\"\n\
+         export https_proxy=\"socks5://127.0.0.1:{}\"\n\
+         export no_proxy=\"localhost,127.0.0.1,::1\"",
         port, port, port
     );
 
@@ -466,6 +466,7 @@ async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // 初始化日志
             tracing_subscriber::fmt()

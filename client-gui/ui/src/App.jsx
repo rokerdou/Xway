@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import './index.css';
 
 function App() {
@@ -62,8 +63,8 @@ function App() {
         const textToCopy = result.replace("自动执行失败，请手动执行以下命令：\n\n", "")
                             .replace("无法自动执行，请手动执行以下命令：\n\n", "");
 
-        // 复制到剪贴板
-        await navigator.clipboard.writeText(textToCopy);
+        // 复制到剪贴板（使用 Tauri API）
+        await writeText(textToCopy);
 
         alert(`⚠️ 自动执行失败\n\n已复制命令到剪贴板！\n\n请在终端中粘贴并执行：\n${textToCopy}\n\n提示：执行后请点击按钮刷新状态`);
       }
@@ -75,17 +76,29 @@ function App() {
 
   const handleCopyEnvVars = async () => {
     try {
+      console.log('🎯 开始复制环境变量...');
+
       // 使用本地SOCKS5代理监听端口1081
       const localProxyPort = 1081;
 
+      console.log('📡 调用 get_proxy_env_vars, port:', localProxyPort);
       const envVars = await invoke('get_proxy_env_vars', { port: localProxyPort });
+      console.log('✅ 获取到环境变量:', envVars);
       setProxyEnvVars(envVars);
 
-      // 复制到剪贴板
-      await navigator.clipboard.writeText(envVars);
+      // 复制到剪贴板（使用 Tauri API）
+      console.log('📋 准备写入剪贴板...');
+      console.log('📦 writeText 函数:', writeText);
+      console.log('🔧 writeText 类型:', typeof writeText);
+
+      await writeText(envVars);
+      console.log('✅ 写入剪贴板成功');
       alert('✅ 环境变量已复制到剪贴板！\n\n在终端中粘贴即可使用');
     } catch (e) {
-      console.error('复制环境变量失败:', e);
+      console.error('❌ 复制环境变量失败:', e);
+      console.error('❌ 错误类型:', e.constructor.name);
+      console.error('❌ 错误信息:', e.message);
+      console.error('❌ 错误堆栈:', e.stack);
       alert('复制失败: ' + e);
     }
   };
