@@ -43,7 +43,7 @@ fn default_enabled() -> bool {
 }
 
 fn default_shared_secret() -> String {
-    "change_me_please".to_string()
+    "my_secret_key_12345".to_string()  // ✅ 与配置文件保持一致
 }
 
 fn default_username() -> String {

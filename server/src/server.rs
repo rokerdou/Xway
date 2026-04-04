@@ -384,6 +384,9 @@ async fn verify_client_auth(
     decryptor: &mut KingObj,
     config: &ServerConfig,
 ) -> anyhow::Result<String> {
+    // 🔍 打印服务端使用的密钥（用于调试）
+    debug!("🔑 服务端使用密钥: \"{}\"", config.auth.shared_secret);
+
     // 读取长度（2字节）
     let mut len_buffer = [0u8; 2];
     stream.read_exact(&mut len_buffer).await?;
@@ -393,17 +396,25 @@ async fn verify_client_auth(
     let mut encrypted = vec![0u8; len];
     stream.read_exact(&mut encrypted).await?;
 
+    debug!("📦 收到认证包: {} 字节（加密后）", len);
+
     // 解密认证包
     decryptor.decode(&mut encrypted, len)?;
 
+    debug!("🔓 解密成功，开始反序列化...");
+
     // 反序列化并验证
     let auth_packet = AuthPacket::deserialize(&encrypted)?;
+
+    debug!("👤 反序列化成功，用户名: {}", auth_packet.username);
 
     // 验证认证包
     auth_packet.verify(
         config.auth.shared_secret.as_bytes(),
         config.auth.max_time_diff_secs,
     )?;
+
+    debug!("✅ 认证包验证成功");
 
     Ok(auth_packet.username)
 }

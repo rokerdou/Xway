@@ -44,6 +44,11 @@ async fn main() -> Result<()> {
         }
     };
 
+    // 🔍 打印认证配置（用于调试）
+    info!("🔐 认证配置: enabled={}, shared_secret=\"{}\"",
+          config.auth.enabled,
+          config.auth.shared_secret);
+
     info!("🎯 监听地址: {}:{}", config.server.listen_addr, config.server.listen_port);
 
     // 创建服务端
