@@ -11,10 +11,10 @@ level = "info"
 log_dir = "./logs"
 max_log_files = 7
 
-[security]
-enable_auth = false
-# username = "admin"
-# password = "password"
+[auth]
+enabled = true
+shared_secret = "my_secret_key_12345"
+max_time_diff_secs = 300
 
 [relay]
 max_buffer_size = 8192

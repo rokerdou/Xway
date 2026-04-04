@@ -20,6 +20,8 @@ bytes = { workspace = true }
 # 加密
 aes-gcm = { workspace = true }
 rand = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 # 工具
 regex = { workspace = true }

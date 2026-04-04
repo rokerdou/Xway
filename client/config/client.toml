@@ -1,7 +1,7 @@
 # 客户端配置
 
 [server]
-remote_server = "72.61.180.33"
+remote_server = "127.0.0.1"
 remote_port = 1080
 
 [local]
@@ -12,7 +12,9 @@ listen_port = 1081
 level = "debug"
 log_dir = "./logs"
 
-[security]
-# 认证信息（如果服务端启用）
-# username = "user"
-# password = "pass"
+[auth]
+enabled = true
+shared_secret = "my_secret_key_12345"
+username = "client"
+sequence = 1
+max_time_diff_secs = 60

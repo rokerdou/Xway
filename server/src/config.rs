@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use anyhow::Result;
+use shared::AuthConfig;
 
 /// 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,8 +12,8 @@ pub struct ServerConfig {
     pub server: ServerSettings,
     /// 日志设置
     pub logging: LoggingSettings,
-    /// 安全设置
-    pub security: SecuritySettings,
+    /// 认证设置
+    pub auth: AuthConfig,
     /// 中继设置
     pub relay: RelaySettings,
 }
@@ -44,18 +45,6 @@ pub struct LoggingSettings {
     /// 最大日志文件数
     #[serde(default = "default_max_log_files")]
     pub max_log_files: usize,
-}
-
-/// 安全设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecuritySettings {
-    /// 是否启用认证
-    #[serde(default)]
-    pub enable_auth: bool,
-    /// 用户名
-    pub username: Option<String>,
-    /// 密码
-    pub password: Option<String>,
 }
 
 /// 中继设置
@@ -109,11 +98,7 @@ impl ServerConfig {
                 log_dir: default_log_dir(),
                 max_log_files: default_max_log_files(),
             },
-            security: SecuritySettings {
-                enable_auth: false,
-                username: None,
-                password: None,
-            },
+            auth: AuthConfig::default(),
             relay: RelaySettings {
                 max_buffer_size: default_buffer_size(),
                 enable_traffic_stats: default_traffic_stats(),

@@ -7,7 +7,7 @@
 //! - 双向加密转发
 
 use crate::config::ServerConfig;
-use shared::{KingObj, Result, TargetAddr};
+use shared::{AuthPacket, KingObj, Result, TargetAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
 use std::sync::Arc;
@@ -71,11 +71,26 @@ async fn handle_client_connection(
 ) -> anyhow::Result<()> {
     debug!("🔌 开始处理客户端连接: {}", client_addr);
 
-    // 创建解密器
-    let mut decryptor = KingObj::new();
+    // 步骤1: 验证客户端认证（如果启用）
+    if config.auth.enabled {
+        debug!("🔐 开始验证客户端认证 [{}]", client_addr);
+        // 为认证创建独立的解密器
+        let mut auth_decryptor = KingObj::new();
+        match verify_client_auth(&mut client_stream, &mut auth_decryptor, &config).await {
+            Ok(username) => {
+                info!("✅ 客户端认证成功: {} [{}]", username, client_addr);
+            }
+            Err(e) => {
+                error!("❌ 客户端认证失败 [{}]: {}", client_addr, e);
+                return Err(e);
+            }
+        }
+    }
 
-    // 步骤1: 读取目标地址（加密的）
-    let target_addr = match read_target_address(&mut client_stream, &mut decryptor).await {
+    // 步骤2: 读取目标地址（加密的）
+    // 为目标地址创建新的解密器（每次连接使用独立的解密器）
+    let mut addr_decryptor = KingObj::new();
+    let target_addr = match read_target_address(&mut client_stream, &mut addr_decryptor).await {
         Ok(addr) => addr,
         Err(e) => {
             error!("❌ 读取目标地址失败 [{}]: {}", client_addr, e);
@@ -85,7 +100,7 @@ async fn handle_client_connection(
 
     info!("🎯 客户端请求连接到: {:?}", target_addr);
 
-    // 步骤2: 连接到目标服务器
+    // 步骤3: 连接到目标服务器
     let target_stream = match connect_to_target(&target_addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -96,7 +111,7 @@ async fn handle_client_connection(
 
     info!("✅ 成功连接到目标服务器");
 
-    // 步骤3: 开始数据转发（客户端 <-> 目标，带加密/解密）
+    // 步骤4: 开始数据转发（客户端 <-> 目标，带加密/解密）
     info!("🔄 开始数据转发 [{}]", client_addr);
     relay_with_encryption(client_stream, target_stream, &config).await?;
 
@@ -278,4 +293,36 @@ async fn relay_with_encryption(
     }
 
     Ok(())
+}
+
+/// 验证客户端认证
+///
+/// 读取并验证加密的认证包
+async fn verify_client_auth(
+    stream: &mut TcpStream,
+    decryptor: &mut KingObj,
+    config: &ServerConfig,
+) -> anyhow::Result<String> {
+    // 读取长度（2字节）
+    let mut len_buffer = [0u8; 2];
+    stream.read_exact(&mut len_buffer).await?;
+    let len = u16::from_be_bytes(len_buffer) as usize;
+
+    // 读取加密的认证包
+    let mut encrypted = vec![0u8; len];
+    stream.read_exact(&mut encrypted).await?;
+
+    // 解密认证包
+    decryptor.decode(&mut encrypted, len)?;
+
+    // 反序列化并验证
+    let auth_packet = AuthPacket::deserialize(&encrypted)?;
+
+    // 验证认证包
+    auth_packet.verify(
+        config.auth.shared_secret.as_bytes(),
+        config.auth.max_time_diff_secs,
+    )?;
+
+    Ok(auth_packet.username)
 }

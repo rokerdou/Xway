@@ -56,6 +56,9 @@ WORKDIR /app
 # 从构建阶段复制二进制文件
 COPY --from=builder /build/target/release/server /app/server
 
+# 复制服务端配置文件
+COPY --from=builder /build/server/config/server.toml /app/server.toml
+
 # 更改所有权
 RUN chown -R proxy:proxy /app
 
@@ -73,5 +76,5 @@ ENV SERVER_ADDRESS=0.0.0.0:1080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD nc -z localhost 1080 || exit 1
 
-# 启动服务端
-CMD ["/app/server"]
+# 启动服务端（使用配置文件）
+CMD ["/app/server", "--config", "/app/server.toml"]

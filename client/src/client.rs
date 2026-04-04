@@ -8,7 +8,7 @@
 //! 5. 将解密后的数据返回给本地SOCKS5客户端
 
 use crate::config::ClientConfig;
-use shared::{KingObj, Result};
+use shared::{AuthPacket, KingObj, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
 use std::sync::Arc;
@@ -104,19 +104,29 @@ async fn handle_local_connection(
 
     info!("✅ 成功连接到远程服务端");
 
-    // 步骤4: 将目标地址加密发送给服务端
+    // 步骤4: 发送认证包（如果启用）
+    if config.auth.enabled {
+        debug!("🔐 发送认证包到远程服务端");
+        if let Err(e) = send_auth_packet(&mut remote_stream, &config).await {
+            error!("❌ 发送认证包失败: {}", e);
+            return Err(e.into());
+        }
+        info!("✅ 认证包发送成功");
+    }
+
+    // 步骤5: 将目标地址加密发送给服务端
     if let Err(e) = send_target_address(&mut remote_stream, &target_addr).await {
         error!("❌ 发送目标地址失败: {}", e);
         return Err(e.into());
     }
 
-    // 步骤5: 发送成功响应给本地客户端
+    // 步骤6: 发送成功响应给本地客户端
     if let Err(e) = send_socks5_success_response(&mut local_stream).await {
         error!("❌ 发送SOCKS5响应失败: {}", e);
         return Err(e.into());
     }
 
-    // 步骤6: 开始数据转发（本地 <-> 远程，带加密）
+    // 步骤7: 开始数据转发（本地 <-> 远程，带加密）
     info!("🔄 开始数据转发 [{}]", local_addr);
     relay_with_encryption(local_stream, remote_stream).await?;
 
@@ -240,6 +250,8 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 
 /// 发送目标地址到远程服务端
 async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr) -> anyhow::Result<()> {
+    debug!("📤 发送目标地址到远程服务端: {:?}", target_addr);
+
     // 将目标地址序列化
     let addr_bytes = target_addr.encode();
 
@@ -251,12 +263,16 @@ async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::Targe
     let encrypted_len = encrypted.len();
     king.encode(&mut encrypted, encrypted_len)?;
 
+    debug!("🔒 目标地址加密后: {} 字节", encrypted_len);
+
     // 发送长度前缀（2字节，大端序）
     let len = encrypted.len() as u16;
     stream.write_all(&len.to_be_bytes()).await?;
 
     // 发送加密后的地址
     stream.write_all(&encrypted).await?;
+
+    debug!("✅ 目标地址发送成功");
 
     Ok(())
 }
@@ -372,6 +388,30 @@ async fn relay_with_encryption(
             }
         }
     }
+
+    Ok(())
+}
+
+/// 发送认证包到远程服务端
+///
+/// 创建、加密并发送认证包
+async fn send_auth_packet(
+    stream: &mut TcpStream,
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
+    // 创建认证包
+    let auth_packet = AuthPacket::new(
+        config.auth.username.clone(),
+        config.auth.shared_secret.as_bytes(),
+        config.auth.sequence,
+    );
+
+    // 加密认证包
+    let mut encryptor = KingObj::new();
+    let encrypted = auth_packet.serialize_encrypted(&mut encryptor)?;
+
+    // 发送加密的认证包
+    stream.write_all(&encrypted).await?;
 
     Ok(())
 }

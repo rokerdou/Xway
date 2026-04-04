@@ -36,6 +36,8 @@ bytes = "1.5"
 # 加密
 aes-gcm = "0.10"
 rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
 
 # 测试
 criterion = "0.5"

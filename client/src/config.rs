@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use anyhow::Result;
+use shared::AuthConfig;
 
 /// 客户端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +14,8 @@ pub struct ClientConfig {
     pub local: LocalSettings,
     /// 日志设置
     pub logging: LoggingSettings,
+    /// 认证设置
+    pub auth: AuthConfig,
 }
 
 /// 远程服务端设置
@@ -73,6 +76,7 @@ impl ClientConfig {
                 level: default_log_level(),
                 log_dir: default_log_dir(),
             },
+            auth: AuthConfig::default(),
         }
     }
 }
