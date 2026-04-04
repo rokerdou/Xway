@@ -213,7 +213,8 @@ function App() {
       port: newServer.port,
       enabled: true
     };
-    setServers([...servers, server]);
+    // 将所有现有服务器设为未激活，新服务器设为激活
+    setServers([...servers.map(s => ({ ...s, enabled: false })), server]);
     setNewServer({ host: '', port: 1080 });
     setShowAddServer(false);
   };
@@ -223,13 +224,24 @@ function App() {
       alert('至少需要保留一个服务器配置');
       return;
     }
-    setServers(servers.filter(s => s.id !== id));
+
+    const removedServer = servers.find(s => s.id === id);
+    const newServers = servers.filter(s => s.id !== id);
+
+    // 如果删除的是激活的服务器，激活第一个服务器
+    if (removedServer?.enabled && newServers.length > 0) {
+      newServers[0].enabled = true;
+    }
+
+    setServers(newServers);
   };
 
   const handleToggleServer = (id) => {
-    setServers(servers.map(s =>
-      s.id === id ? { ...s, enabled: !s.enabled } : s
-    ));
+    // 单选模式：点击服务器时，将其设为激活状态，其他服务器设为未激活
+    setServers(servers.map(s => ({
+      ...s,
+      enabled: s.id === id
+    })));
   };
 
   const getActiveServer = () => {
@@ -415,25 +427,39 @@ function App() {
             {servers.map((server) => (
               <div
                 key={server.id}
-                className={`bg-gray-700/50 rounded-lg p-2 ${
-                  server.enabled ? 'border-l-2 border-green-500' : 'border-l-2 border-gray-500'
+                onClick={() => handleToggleServer(server.id)}
+                className={`bg-gray-700/50 rounded-lg p-2 cursor-pointer transition-all ${
+                  server.enabled
+                    ? 'border-l-4 border-green-500 bg-green-900/20'
+                    : 'border-l-2 border-gray-500 hover:bg-gray-700'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => handleToggleServer(server.id)}
-                      className={`w-2.5 h-2.5 rounded-full transition-colors ${
-                        server.enabled ? 'bg-green-500' : 'bg-gray-500'
+                    <div
+                      className={`w-3 h-3 rounded-full border-2 transition-colors ${
+                        server.enabled
+                          ? 'bg-green-500 border-green-400'
+                          : 'bg-gray-600 border-gray-500'
                       }`}
                     />
-                    <span className="text-xs font-medium">
+                    <span className={`text-xs font-medium ${
+                      server.enabled ? 'text-green-400' : 'text-gray-300'
+                    }`}>
                       {server.host}:{server.port}
                     </span>
+                    {server.enabled && (
+                      <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded">
+                        使用中
+                      </span>
+                    )}
                   </div>
                   <button
-                    onClick={() => handleRemoveServer(server.id)}
-                    className="text-[10px] text-red-400 hover:text-red-300"
+                    onClick={(e) => {
+                      e.stopPropagation(); // 阻止事件冒泡，避免触发选择
+                      handleRemoveServer(server.id);
+                    }}
+                    className="text-[10px] text-red-400 hover:text-red-300 hover:bg-red-900/30 px-2 py-1 rounded transition-colors"
                   >
                     删除
                   </button>
