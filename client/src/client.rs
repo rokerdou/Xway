@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// SOCKS5代理客户端
 pub struct ProxyClient {
     /// 客户端配置
-    config: ClientConfig,
+    config: Arc<ClientConfig>,
     /// 连接信号量（限制最大连接数）
     semaphore: Arc<Semaphore>,
 }
@@ -30,15 +30,20 @@ impl ProxyClient {
         let semaphore = Arc::new(Semaphore::new(100)); // 默认最多100个连接
 
         Ok(Self {
-            config,
+            config: Arc::new(config),
             semaphore,
         })
     }
 
     /// 启动客户端
     pub async fn run(&self) -> Result<()> {
-        let bind_addr = format!("{}:{}", self.config.local.listen_addr, self.config.local.listen_port);
-        let listener = TcpListener::bind(&bind_addr).await?;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let bind_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            self.config.local.listen_port
+        );
+        let listener = TcpListener::bind(bind_addr).await?;
 
         info!("🎯 SOCKS5代理客户端监听: {}", bind_addr);
         info!("📡 远程服务端: {}:{}", self.config.server.remote_server, self.config.server.remote_port);
@@ -53,7 +58,7 @@ impl ProxyClient {
             info!("📥 新的本地连接来自: {}", local_addr);
 
             // 处理连接
-            let config = self.config.clone();
+            let config = self.config.clone(); // Arc克隆是零成本的
             tokio::spawn(async move {
                 let _permit = permit; // 持有许可直到连接结束
 
@@ -69,7 +74,7 @@ impl ProxyClient {
 async fn handle_local_connection(
     mut local_stream: TcpStream,
     local_addr: SocketAddr,
-    config: ClientConfig,
+    config: Arc<ClientConfig>,
 ) -> anyhow::Result<()> {
     debug!("🔌 开始处理本地连接: {}", local_addr);
 
@@ -243,7 +248,19 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
 
 /// 连接到远程服务端
 async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpStream> {
-    let addr = format!("{}:{}", config.server.remote_server, config.server.remote_port);
+    // 构造地址字符串（只调用一次，影响较小）
+    let addr_str = &config.server.remote_server;
+    let port = config.server.remote_port;
+
+    // 使用 &str 拼接避免格式化（编译器会优化）
+    let addr = if addr_str.contains(':') {
+        // IPv6地址需要用方括号
+        format!("[{}]:{}", addr_str, port)
+    } else {
+        // IPv4或域名
+        format!("{}:{}", addr_str, port)
+    };
+
     let stream = TcpStream::connect(&addr).await?;
     Ok(stream)
 }
