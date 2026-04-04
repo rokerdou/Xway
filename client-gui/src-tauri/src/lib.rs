@@ -286,13 +286,48 @@ pub fn run() {
 /// 创建系统托盘
 #[cfg(desktop)]
 async fn create_tray(app: tauri::AppHandle) {
-    use tauri::tray::TrayIconBuilder;
+    use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
 
-    // 创建托盘图标（macOS和Windows都支持）
+    // 创建托盘图标
     let _tray = TrayIconBuilder::new()
         .tooltip("SOCKS5 代理客户端")
         .icon_as_template(true)  // macOS需要
+        .on_tray_icon_event(move |tray, event| {
+            match event {
+                TrayIconEvent::Click {
+                    id: _,
+                    position: _,
+                    rect: _,
+                    button_state: _,
+                    button: _,
+                } => {
+                    // 单击托盘图标：显示/隐藏窗口
+                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                        if window.is_visible().unwrap() {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                }
+                TrayIconEvent::DoubleClick {
+                    id: _,
+                    position: _,
+                    rect: _,
+                    button: _,
+                } => {
+                    // 双击托盘图标：显示窗口并聚焦
+                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                _ => {}
+            }
+        })
         .build(&app);
 
-    println!("托盘图标已创建");
+    tracing::info!("✅ 系统托盘已创建");
 }
