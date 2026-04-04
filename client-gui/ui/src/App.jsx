@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import './index.css';
 
 function App() {
@@ -13,8 +14,81 @@ function App() {
   const [stats, setStats] = useState({ upload_bytes: 0, download_bytes: 0, connections: 0 });
   const [latency, setLatency] = useState(null);
   const [testing, setTesting] = useState(false);
+  const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
+  const [proxyEnvVars, setProxyEnvVars] = useState('');
   const [showAddServer, setShowAddServer] = useState(false);
   const [newServer, setNewServer] = useState({ host: '', port: 1080 });
+
+  const appWindow = getCurrentWindow();
+
+  const handleCloseWindow = async () => {
+    console.log('🖱️ handleCloseWindow 被调用');
+    try {
+      console.log('⏳ 准备关闭窗口...');
+      await invoke('close_window');
+      console.log('✅ 窗口关闭成功');
+    } catch (e) {
+      console.error('❌ 关闭窗口失败:', e);
+    }
+  };
+
+  const handleMinimizeWindow = async () => {
+    console.log('🖱️ handleMinimizeWindow 被调用');
+    try {
+      console.log('⏳ 准备最小化窗口...');
+      await invoke('minimize_window');
+      console.log('✅ 窗口最小化成功');
+    } catch (e) {
+      console.error('❌ 最小化窗口失败:', e);
+    }
+  };
+
+  const handleToggleSystemProxy = async () => {
+    try {
+      // 使用本地SOCKS5代理监听端口1081，而不是远程服务器端口
+      const localProxyPort = 1081;
+
+      const result = await invoke('set_system_proxy', { enabled: !systemProxyEnabled, port: localProxyPort });
+
+      if (result.startsWith('✅')) {
+        // 成功
+        setSystemProxyEnabled(!systemProxyEnabled);
+        alert(result);
+      } else {
+        // 失败，显示命令让用户手动执行
+        setSystemProxyEnabled(!systemProxyEnabled); // 假设用户会手动执行
+
+        // 创建可复制的文本
+        const textToCopy = result.replace("自动执行失败，请手动执行以下命令：\n\n", "")
+                            .replace("无法自动执行，请手动执行以下命令：\n\n", "");
+
+        // 复制到剪贴板
+        await navigator.clipboard.writeText(textToCopy);
+
+        alert(`⚠️ 自动执行失败\n\n已复制命令到剪贴板！\n\n请在终端中粘贴并执行：\n${textToCopy}\n\n提示：执行后请点击按钮刷新状态`);
+      }
+    } catch (e) {
+      console.error('设置系统代理失败:', e);
+      alert(`设置系统代理失败: ${e}`);
+    }
+  };
+
+  const handleCopyEnvVars = async () => {
+    try {
+      // 使用本地SOCKS5代理监听端口1081
+      const localProxyPort = 1081;
+
+      const envVars = await invoke('get_proxy_env_vars', { port: localProxyPort });
+      setProxyEnvVars(envVars);
+
+      // 复制到剪贴板
+      await navigator.clipboard.writeText(envVars);
+      alert('✅ 环境变量已复制到剪贴板！\n\n在终端中粘贴即可使用');
+    } catch (e) {
+      console.error('复制环境变量失败:', e);
+      alert('复制失败: ' + e);
+    }
+  };
 
   // 加载配置和状态
   useEffect(() => {
@@ -195,13 +269,50 @@ function App() {
   };
 
   return (
-    <div className="h-screen bg-gray-900 text-white flex items-center justify-center p-3 overflow-hidden">
-      <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-sm p-3 space-y-2">
-        {/* 标题 */}
-        <div className="text-center pb-1">
-          <h1 className="text-lg font-bold">SOCKS5 代理</h1>
-          <p className="text-gray-400 text-[10px]">简洁安全的网络代理工具</p>
+    <div className="h-full w-full bg-gray-900 text-white">
+      {/* 顶部标题栏 - 可拖拽窗口 */}
+      <div className="bg-gray-800 border-b border-gray-700 flex items-center" style={{ height: '41px' }}>
+        {/* 左侧标题区域 - 可拖拽 */}
+        <div className="flex-1 flex items-center px-3" data-tauri-drag-region>
+          <span className="text-sm font-semibold select-none">SOCKS5 代理</span>
         </div>
+
+        {/* 右侧窗口控制按钮 */}
+        <div className="flex items-center">
+          {/* 最小化按钮 */}
+          <button
+            onClick={handleMinimizeWindow}
+            className="text-gray-400 hover:text-white hover:bg-gray-700 rounded px-2 py-1 transition-colors"
+            title="最小化"
+            style={{ width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+            </svg>
+          </button>
+
+          {/* 关闭按钮 */}
+          <button
+            onClick={handleCloseWindow}
+            className="text-gray-400 hover:text-red-500 hover:bg-gray-700 rounded px-2 py-1 transition-colors"
+            title="关闭窗口"
+            style={{ width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* 主内容区域 */}
+      <div className="p-3 overflow-y-auto" style={{ height: 'calc(100% - 41px)' }}>
+        <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-md mx-auto p-2.5 space-y-1.5">
+          {/* 标题 */}
+          <div className="text-center pb-0.5">
+            <h1 className="text-lg font-bold">SOCKS5 代理</h1>
+            <p className="text-gray-400 text-[10px]">简洁安全的网络代理工具</p>
+          </div>
 
         {/* 状态指示器 */}
         <div className="bg-gray-700/50 rounded-lg p-2">
@@ -370,6 +481,45 @@ function App() {
             <p className="text-[9px] text-gray-400 mb-0.5">连接数</p>
             <p className="text-xs font-semibold">{stats.connections}</p>
           </div>
+        </div>
+
+        {/* 系统代理设置 */}
+        <div className="space-y-1.5">
+          <h2 className="text-xs font-semibold text-gray-300">系统代理设置 (SOCKS)</h2>
+          <button
+            onClick={handleToggleSystemProxy}
+            className={`w-full py-1.5 rounded-md text-xs font-medium transition-colors ${
+              systemProxyEnabled
+                ? 'bg-red-600 hover:bg-red-700'
+                : 'bg-green-600 hover:bg-green-700'
+            }`}
+          >
+            {systemProxyEnabled ? '🔴 关闭系统代理' : '🟢 启用系统代理'}
+          </button>
+          <p className="text-[9px] text-yellow-400">
+            ⚠️ 需要管理员权限
+          </p>
+        </div>
+
+        {/* 环境变量 */}
+        <div className="space-y-1.5">
+          <h2 className="text-xs font-semibold text-gray-300">终端代理设置</h2>
+          <button
+            onClick={handleCopyEnvVars}
+            className="w-full bg-purple-600 hover:bg-purple-700 py-1.5 rounded-md text-xs font-medium transition-colors"
+          >
+            📋 复制环境变量
+          </button>
+          {proxyEnvVars && (
+            <div className="bg-gray-900/50 rounded-lg p-2">
+              <p className="text-[9px] text-gray-400 mb-1">在终端中粘贴：</p>
+              <pre className="text-[9px] text-green-400 whitespace-pre-wrap break-all">
+                {proxyEnvVars}
+              </pre>
+              <p className="text-[9px] text-gray-500 mt-1">适用于 bash/zsh</p>
+            </div>
+          )}
+        </div>
         </div>
       </div>
     </div>

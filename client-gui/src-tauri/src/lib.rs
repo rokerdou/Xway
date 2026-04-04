@@ -231,6 +231,237 @@ async fn check_local_port(port: u16) -> Result<bool, String> {
     Ok(check_port_listening(port).await)
 }
 
+/// 设置 macOS 系统 SOCKS代理（需要管理员权限）
+#[tauri::command]
+async fn set_system_proxy(enabled: bool, port: u16) -> Result<String, String> {
+    use std::process::Command;
+
+    // 获取当前网络服务（通常是Wi-Fi或Ethernet）
+    let get_service_script = "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
+
+    let service_output = Command::new("osascript")
+        .arg("-e")
+        .arg(get_service_script)
+        .output()
+        .map_err(|e| format!("获取网络服务失败: {}", e))?;
+
+    let service_name = String::from_utf8_lossy(&service_output.stdout).trim().to_string();
+    tracing::info!("检测到网络服务: {}", service_name);
+
+    if service_name.is_empty() {
+        return Err("无法获取网络服务名称".to_string());
+    }
+
+    // 构建networksetup命令
+    let command = if enabled {
+        // 启用SOCKS代理时，先禁用HTTP/HTTPS代理，再启用SOCKS代理
+        format!(
+            "networksetup -setwebproxystate {} off && \
+             networksetup -setsecurewebproxystate {} off && \
+             networksetup -setsocksfirewallproxy {} 127.0.0.1 {} && \
+             networksetup -setsocksfirewallproxystate {} on",
+            service_name, service_name, service_name, port, service_name
+        )
+    } else {
+        // 禁用SOCKS代理时，也确保HTTP/HTTPS代理都被禁用
+        format!(
+            "networksetup -setwebproxystate {} off && \
+             networksetup -setsecurewebproxystate {} off && \
+             networksetup -setsocksfirewallproxystate {} off",
+            service_name, service_name, service_name
+        )
+    };
+
+    tracing::info!("尝试自动执行: {}", command);
+
+    // 使用AppleScript with administrator privileges执行
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        command
+    );
+
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("执行osascript失败: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    tracing::info!("命令执行结果 - exit code: {:?}", output.status.code());
+    tracing::info!("stdout: {}", stdout);
+    tracing::info!("stderr: {}", stderr);
+
+    if output.status.success() {
+        // 添加延迟以等待系统更新
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // 验证SOCKS代理设置
+        let verify_script = format!(
+            "do shell script \"networksetup -getsocksfirewallproxy {}\"",
+            service_name
+        );
+
+        let verify_output = Command::new("osascript")
+            .arg("-e")
+            .arg(&verify_script)
+            .output()
+            .map_err(|e| format!("验证失败: {}", e))?;
+
+        let verify_result = String::from_utf8_lossy(&verify_output.stdout);
+        tracing::info!("SOCKS代理验证结果: {}", verify_result);
+
+        // 验证HTTP/HTTPS代理已禁用
+        let http_verify_script = format!(
+            "do shell script \"networksetup -getwebproxy {} && networksetup -getsecurewebproxy {}\"",
+            service_name, service_name
+        );
+
+        let http_verify_output = Command::new("osascript")
+            .arg("-e")
+            .arg(&http_verify_script)
+            .output()
+            .map_err(|e| format!("验证HTTP代理失败: {}", e))?;
+
+        let http_verify_result = String::from_utf8_lossy(&http_verify_output.stdout);
+        tracing::info!("HTTP/HTTPS代理验证结果: {}", http_verify_result);
+
+        let socks_success = if enabled {
+            verify_result.contains("Enabled: Yes") && verify_result.contains("127.0.0.1")
+        } else {
+            verify_result.contains("Enabled: No")
+        };
+
+        // 检查HTTP/HTTPS代理是否已禁用
+        let http_disabled = http_verify_result.contains("Enabled: No");
+
+        if socks_success && http_disabled {
+            let message = if enabled {
+                format!("✅ 系统代理已启用: 127.0.0.1:{} (服务: {})\n💡 已自动禁用HTTP/HTTPS代理", port, service_name)
+            } else {
+                format!("✅ 系统代理已禁用 (服务: {})\n💡 HTTP/HTTPS代理也已禁用", service_name)
+            };
+            tracing::info!("{}", message);
+            return Ok(message);
+        } else {
+            tracing::warn!("验证失败 - SOCKS成功: {}, HTTP已禁用: {}", socks_success, http_disabled);
+            return Err(format!("命令已执行但验证失败，请手动检查设置"));
+        }
+    }
+
+    Err(format!("命令执行失败 (exit code: {:?})", output.status.code()))
+}
+
+/// 获取代理环境变量配置
+#[tauri::command]
+async fn get_proxy_env_vars(port: u16) -> Result<String, String> {
+    let vars = format!(
+r#"export all_proxy="socks5://127.0.0.1:{}"
+export http_proxy="socks5://127.0.0.1:{}"
+export https_proxy="socks5://127.0.0.1:{}"
+export no_proxy="localhost,127.0.0.1,::1"#,
+        port, port, port
+    );
+
+    Ok(vars)
+}
+
+/// 检查系统代理状态
+#[tauri::command]
+async fn check_system_proxy_status() -> Result<bool, String> {
+    use std::process::Command;
+
+    // 获取当前网络服务
+    let get_service_script = "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
+
+    let service_output = Command::new("osascript")
+        .arg("-e")
+        .arg(get_service_script)
+        .output()
+        .map_err(|e| format!("获取网络服务失败: {}", e))?;
+
+    let service_name = String::from_utf8_lossy(&service_output.stdout).trim().to_string();
+
+    if service_name.is_empty() {
+        return Ok(false);
+    }
+
+    // 检查SOCKS代理状态
+    let check_script = format!(
+        "do shell script \"networksetup -getsocksfirewallproxy {}\"",
+        service_name
+    );
+
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(&check_script)
+        .output()
+        .map_err(|e| format!("检查代理状态失败: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // 检查SOCKS代理是否启用
+    let socks_enabled = stdout.contains("Enabled: Yes");
+
+    // 同时检查HTTP/HTTPS代理状态
+    let http_check_script = format!(
+        "do shell script \"networksetup -getwebproxy {}\"",
+        service_name
+    );
+
+    let http_output = Command::new("osascript")
+        .arg("-e")
+        .arg(&http_check_script)
+        .output()
+        .map_err(|e| format!("检查HTTP代理状态失败: {}", e))?;
+
+    let http_stdout = String::from_utf8_lossy(&http_output.stdout);
+    let http_enabled = http_stdout.contains("Enabled: Yes");
+
+    let https_check_script = format!(
+        "do shell script \"networksetup -getsecurewebproxy {}\"",
+        service_name
+    );
+
+    let https_output = Command::new("osascript")
+        .arg("-e")
+        .arg(&https_check_script)
+        .output()
+        .map_err(|e| format!("检查HTTPS代理状态失败: {}", e))?;
+
+    let https_stdout = String::from_utf8_lossy(&https_output.stdout);
+    let https_enabled = https_stdout.contains("Enabled: Yes");
+
+    tracing::info!(
+        "系统代理状态检查 - SOCKS: {}, HTTP: {}, HTTPS: {}, service: {}",
+        socks_enabled, http_enabled, https_enabled, service_name
+    );
+
+    // 只有SOCKS代理启用时才返回true
+    Ok(socks_enabled)
+}
+
+/// 关闭窗口
+#[tauri::command]
+async fn close_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.close()
+            .map_err(|e| format!("关闭窗口失败: {}", e))?;
+    }
+    Ok(())
+}
+
+/// 最小化窗口
+#[tauri::command]
+async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.minimize()
+            .map_err(|e| format!("最小化窗口失败: {}", e))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -256,13 +487,15 @@ pub fn run() {
 
             app.manage(state);
 
-            // 创建系统托盘
+            // 创建系统托盘（同步创建，避免时序问题）
             #[cfg(desktop)]
             {
                 let app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
+                // 使用 block_on 在当前上下文中同步创建托盘
+                tauri::async_runtime::block_on(async move {
                     create_tray(app_handle).await;
                 });
+                tracing::info!("🎯 主窗口应该已经创建");
             }
 
             Ok(())
@@ -278,6 +511,11 @@ pub fn run() {
             get_servers_config,
             update_servers_config,
             check_local_port,
+            set_system_proxy,
+            get_proxy_env_vars,
+            check_system_proxy_status,
+            close_window,
+            minimize_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -286,48 +524,72 @@ pub fn run() {
 /// 创建系统托盘
 #[cfg(desktop)]
 async fn create_tray(app: tauri::AppHandle) {
-    use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-    use tauri::Manager;
+    use tray_icon::{
+        TrayIconBuilder,
+        menu::{Menu, MenuItem},
+        Icon,
+    };
 
-    // 创建托盘图标
-    let _tray = TrayIconBuilder::new()
-        .tooltip("SOCKS5 代理客户端")
-        .icon_as_template(true)  // macOS需要
-        .on_tray_icon_event(move |tray, event| {
+    // 使用 image crate 加载并解码 PNG 图标
+    let icon_bytes = include_bytes!("../icons/32x32.png");
+    let img = image::load_from_memory(icon_bytes).expect("解码图标失败");
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let icon = Icon::from_rgba(rgba.into_raw(), width, height).expect("创建图标失败");
+
+    tracing::info!("🔍 托盘图标尺寸: {}x{}", width, height);
+
+    // 创建菜单
+    let quit_item = MenuItem::new("退出", true, None);
+    let menu = Menu::new();
+    let _ = menu.append(&quit_item);
+
+    // 创建托盘图标并添加菜单
+    let tray = TrayIconBuilder::new()
+        .with_icon(icon)
+        .with_icon_as_template(false)  // 不使用 template 模式，保持原色
+        .with_menu(Box::new(menu))  // 添加菜单到托盘图标
+        .with_tooltip("SOCKS5 代理客户端")
+        .build();
+
+    match tray {
+        Ok(_) => tracing::info!("✅ 系统托盘已创建"),
+        Err(e) => tracing::error!("❌ 创建托盘图标失败: {}", e),
+    }
+
+    // 设置托盘图标点击事件处理
+    let app_handle_for_click = app.clone();
+    let _ = tray_icon::TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| {
+        tracing::info!("🖱️ 托盘图标事件: {:?}", event);
+
+        // 单击托盘图标：显示/隐藏窗口
+        if let Some(window) = app_handle_for_click.get_webview_window("main") {
             match event {
-                TrayIconEvent::Click {
-                    id: _,
-                    position: _,
-                    rect: _,
-                    button_state: _,
-                    button: _,
-                } => {
-                    // 单击托盘图标：显示/隐藏窗口
-                    if let Some(window) = tray.app_handle().get_webview_window("main") {
-                        if window.is_visible().unwrap() {
-                            let _ = window.hide();
-                        } else {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                }
-                TrayIconEvent::DoubleClick {
-                    id: _,
-                    position: _,
-                    rect: _,
-                    button: _,
-                } => {
-                    // 双击托盘图标：显示窗口并聚焦
-                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                tray_icon::TrayIconEvent::Click { .. } => {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
                 }
+                tray_icon::TrayIconEvent::DoubleClick { .. } => {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
                 _ => {}
             }
-        })
-        .build(&app);
+        }
+    }));
 
-    tracing::info!("✅ 系统托盘已创建");
+    // 设置菜单事件处理
+    let app_handle_for_menu = app.clone();
+    let _ = tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
+        tracing::info!("📋 菜单事件: {:?}", event);
+
+        if event.id.0 == "退出" {
+            // 退出应用
+            let _ = app_handle_for_menu.exit(0);
+        }
+    }));
 }
