@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// SOCKS5代理服务端
 pub struct ProxyServer {
     /// 服务端配置
-    config: ServerConfig,
+    config: Arc<ServerConfig>,
     /// 连接信号量（限制最大连接数）
     semaphore: Arc<Semaphore>,
 }
@@ -28,15 +28,20 @@ impl ProxyServer {
         let semaphore = Arc::new(Semaphore::new(config.server.max_connections));
 
         Ok(Self {
-            config,
+            config: Arc::new(config),
             semaphore,
         })
     }
 
     /// 启动服务端
     pub async fn run(&self) -> Result<()> {
-        let bind_addr = format!("{}:{}", self.config.server.listen_addr, self.config.server.listen_port);
-        let listener = TcpListener::bind(&bind_addr).await?;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let bind_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            self.config.server.listen_port
+        );
+        let listener = TcpListener::bind(bind_addr).await?;
 
         info!("🎯 SOCKS5代理服务端监听: {}", bind_addr);
         info!("📊 最大连接数: {}", self.config.server.max_connections);
@@ -48,10 +53,10 @@ impl ProxyServer {
             // 获取信号量许可
             let permit = self.semaphore.clone().acquire_owned().await.unwrap();
 
-            info!("📥 新的客户端连接: {}", client_addr);
+            debug!("📥 新的客户端连接: {}", client_addr);
 
             // 处理连接
-            let config = self.config.clone();
+            let config = self.config.clone(); // Arc克隆是零成本的
             tokio::spawn(async move {
                 let _permit = permit; // 持有许可直到连接结束
 
@@ -67,7 +72,7 @@ impl ProxyServer {
 async fn handle_client_connection(
     mut client_stream: TcpStream,
     client_addr: std::net::SocketAddr,
-    config: ServerConfig,
+    config: Arc<ServerConfig>,
 ) -> anyhow::Result<()> {
     debug!("🔌 开始处理客户端连接: {}", client_addr);
 
@@ -78,7 +83,7 @@ async fn handle_client_connection(
         let mut auth_decryptor = KingObj::new();
         match verify_client_auth(&mut client_stream, &mut auth_decryptor, &config).await {
             Ok(username) => {
-                info!("✅ 客户端认证成功: {} [{}]", username, client_addr);
+                debug!("✅ 客户端认证成功: {} [{}]", username, client_addr);
             }
             Err(e) => {
                 error!("❌ 客户端认证失败 [{}]: {}", client_addr, e);
