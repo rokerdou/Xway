@@ -1,6 +1,6 @@
 //! SOCKS5代理客户端核心逻辑
 
-use crate::{ClientConfig, ProxyStatus, Result};
+use crate::{ClientConfig, ProxyStatus, Result, ConnectionGuard};
 use shared::{AuthPacket, KingObj};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
@@ -257,7 +257,12 @@ async fn handle_local_connection(
 ) -> anyhow::Result<()> {
     debug!("开始处理本地连接: {}", local_addr);
 
+    // 增加连接计数
     status.increment_connections();
+
+    // 创建连接守卫，确保函数结束时自动减少连接计数
+    // 无论函数从哪个路径返回（正常、错误、panic），guard 的 Drop 都会被调用
+    let _guard = ConnectionGuard::new(&status);
 
     // SOCKS5握手
     if let Err(e) = handle_socks5_handshake(&mut local_stream).await {

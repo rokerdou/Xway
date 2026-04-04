@@ -9,7 +9,7 @@ pub mod platform;
 
 pub use config::{ClientConfig, ServerConfig};
 pub use proxy::ProxyClient;
-pub use state::{ProxyState, ProxyStatus};
+pub use state::{ProxyState, ProxyStatus, ConnectionGuard};
 
 /// 代理客户端错误类型
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

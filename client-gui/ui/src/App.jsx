@@ -195,24 +195,24 @@ function App() {
   };
 
   return (
-    <div className="h-screen bg-gray-900 text-white flex items-center justify-center p-4 overflow-hidden">
-      <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-sm max-h-full overflow-y-auto p-5 space-y-4">
+    <div className="h-screen bg-gray-900 text-white flex items-center justify-center p-3 overflow-hidden">
+      <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-sm p-3 space-y-2">
         {/* 标题 */}
-        <div className="text-center pb-2">
-          <h1 className="text-xl font-bold">SOCKS5 代理</h1>
-          <p className="text-gray-400 text-xs">简洁安全的网络代理工具</p>
+        <div className="text-center pb-1">
+          <h1 className="text-lg font-bold">SOCKS5 代理</h1>
+          <p className="text-gray-400 text-[10px]">简洁安全的网络代理工具</p>
         </div>
 
         {/* 状态指示器 */}
-        <div className="bg-gray-700/50 rounded-lg p-3">
-          <div className="flex items-center justify-between mb-2">
+        <div className="bg-gray-700/50 rounded-lg p-2">
+          <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-              <span className="text-xs">{status}</span>
+              <div className={`w-2 h-2 rounded-full ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+              <span className="text-[11px]">{status}</span>
             </div>
             <button
               onClick={handleToggle}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
                 isRunning
                   ? 'bg-red-600 hover:bg-red-700'
                   : 'bg-green-600 hover:bg-green-700'
@@ -224,7 +224,7 @@ function App() {
 
           {/* 错误信息显示 */}
           {statusError && (
-            <div className="mt-2 text-xs text-red-400 bg-red-900/20 rounded px-2 py-1">
+            <div className="mt-1 text-[10px] text-red-400 bg-red-900/20 rounded px-2 py-1">
               <div className="flex items-start gap-1">
                 <span>⚠️</span>
                 <span className="break-all">{statusError}</span>
@@ -241,12 +241,12 @@ function App() {
         )} */}
 
         {/* 服务器配置 */}
-        <div className="space-y-3">
+        <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-300">服务器配置</h2>
+            <h2 className="text-xs font-semibold text-gray-300">服务器配置</h2>
             <button
               onClick={() => setShowAddServer(!showAddServer)}
-              className="text-xs bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded"
+              className="text-[10px] bg-blue-600 hover:bg-blue-700 px-2 py-0.5 rounded"
             >
               + 添加
             </button>
@@ -254,31 +254,31 @@ function App() {
 
           {/* 添加服务器表单 */}
           {showAddServer && (
-            <div className="bg-gray-700/50 rounded-lg p-3 space-y-2">
+            <div className="bg-gray-700/50 rounded-lg p-2 space-y-1.5">
               <input
                 type="text"
                 placeholder="服务器地址"
                 value={newServer.host}
                 onChange={(e) => setNewServer({ ...newServer, host: e.target.value })}
-                className="w-full bg-gray-600 border border-gray-500 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full bg-gray-600 border border-gray-500 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-blue-500"
               />
               <input
                 type="number"
                 placeholder="端口"
                 value={newServer.port}
                 onChange={(e) => setNewServer({ ...newServer, port: Number(e.target.value) })}
-                className="w-full bg-gray-600 border border-gray-500 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full bg-gray-600 border border-gray-500 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-blue-500"
               />
-              <div className="flex gap-2">
+              <div className="flex gap-1.5">
                 <button
                   onClick={handleAddServer}
-                  className="flex-1 bg-green-600 hover:bg-green-700 py-1.5 rounded-md text-sm font-medium transition-colors"
+                  className="flex-1 bg-green-600 hover:bg-green-700 py-1 rounded-md text-xs font-medium transition-colors"
                 >
                   确定
                 </button>
                 <button
                   onClick={() => setShowAddServer(false)}
-                  className="flex-1 bg-gray-600 hover:bg-gray-700 py-1.5 rounded-md text-sm font-medium transition-colors"
+                  className="flex-1 bg-gray-600 hover:bg-gray-700 py-1 rounded-md text-xs font-medium transition-colors"
                 >
                   取消
                 </button>
@@ -287,29 +287,29 @@ function App() {
           )}
 
           {/* 服务器列表 */}
-          <div className="space-y-2 max-h-48 overflow-y-auto">
+          <div className="space-y-1 max-h-28 overflow-y-auto">
             {servers.map((server) => (
               <div
                 key={server.id}
-                className={`bg-gray-700/50 rounded-lg p-3 ${
-                  server.enabled ? 'border-l-4 border-green-500' : 'border-l-4 border-gray-500'
+                className={`bg-gray-700/50 rounded-lg p-2 ${
+                  server.enabled ? 'border-l-2 border-green-500' : 'border-l-2 border-gray-500'
                 }`}
               >
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => handleToggleServer(server.id)}
-                      className={`w-3 h-3 rounded-full transition-colors ${
+                      className={`w-2.5 h-2.5 rounded-full transition-colors ${
                         server.enabled ? 'bg-green-500' : 'bg-gray-500'
                       }`}
                     />
-                    <span className="text-sm font-medium">
+                    <span className="text-xs font-medium">
                       {server.host}:{server.port}
                     </span>
                   </div>
                   <button
                     onClick={() => handleRemoveServer(server.id)}
-                    className="text-xs text-red-400 hover:text-red-300"
+                    className="text-[10px] text-red-400 hover:text-red-300"
                   >
                     删除
                   </button>
@@ -320,14 +320,14 @@ function App() {
 
           <button
             onClick={handleSave}
-            className="w-full bg-blue-600 hover:bg-blue-700 py-1.5 rounded-md text-sm font-medium transition-colors"
+            className="w-full bg-blue-600 hover:bg-blue-700 py-1 rounded-md text-xs font-medium transition-colors"
           >
             保存配置
           </button>
           <button
             onClick={handleTestLatency}
             disabled={testing}
-            className={`w-full py-1.5 rounded-md text-sm font-medium transition-colors ${
+            className={`w-full py-1 rounded-md text-xs font-medium transition-colors ${
               testing
                 ? 'bg-gray-600 cursor-not-allowed'
                 : 'bg-purple-600 hover:bg-purple-700'
@@ -339,36 +339,36 @@ function App() {
 
         {/* 测速结果 */}
         {latency !== null && (
-          <div className={`bg-gray-700/50 rounded-lg p-3 ${getLatencyColor(latency)}`}>
+          <div className={`bg-gray-700/50 rounded-lg p-2 ${getLatencyColor(latency)}`}>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-[10px] text-gray-400 mb-0.5">服务器延迟</p>
-                <p className="text-lg font-bold">{latency} ms</p>
+                <p className="text-[9px] text-gray-400 mb-0.5">服务器延迟</p>
+                <p className="text-sm font-bold">{latency} ms</p>
               </div>
               <div className="text-right">
-                <p className="text-[10px] text-gray-400 mb-0.5">连接质量</p>
-                <p className="text-sm font-semibold">{getLatencyLevel(latency)}</p>
+                <p className="text-[9px] text-gray-400 mb-0.5">连接质量</p>
+                <p className="text-xs font-semibold">{getLatencyLevel(latency)}</p>
               </div>
             </div>
           </div>
         )}
 
         {/* 流量统计 */}
-        <div className="space-y-2">
-          <h2 className="text-sm font-semibold text-gray-300">流量统计</h2>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-gray-700/50 rounded-lg p-3">
-              <p className="text-[10px] text-gray-400 mb-0.5">上传</p>
-              <p className="text-sm font-semibold">{formatBytes(stats.upload_bytes)}</p>
+        <div className="space-y-1.5">
+          <h2 className="text-xs font-semibold text-gray-300">流量统计</h2>
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="bg-gray-700/50 rounded-lg p-2">
+              <p className="text-[9px] text-gray-400 mb-0.5">上传</p>
+              <p className="text-xs font-semibold">{formatBytes(stats.upload_bytes)}</p>
             </div>
-            <div className="bg-gray-700/50 rounded-lg p-3">
-              <p className="text-[10px] text-gray-400 mb-0.5">下载</p>
-              <p className="text-sm font-semibold">{formatBytes(stats.download_bytes)}</p>
+            <div className="bg-gray-700/50 rounded-lg p-2">
+              <p className="text-[9px] text-gray-400 mb-0.5">下载</p>
+              <p className="text-xs font-semibold">{formatBytes(stats.download_bytes)}</p>
             </div>
           </div>
-          <div className="bg-gray-700/50 rounded-lg p-3">
-            <p className="text-[10px] text-gray-400 mb-0.5">连接数</p>
-            <p className="text-sm font-semibold">{stats.connections}</p>
+          <div className="bg-gray-700/50 rounded-lg p-2">
+            <p className="text-[9px] text-gray-400 mb-0.5">连接数</p>
+            <p className="text-xs font-semibold">{stats.connections}</p>
           </div>
         </div>
       </div>

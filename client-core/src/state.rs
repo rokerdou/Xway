@@ -75,6 +75,16 @@ impl ProxyStatus {
         self.stats.connections.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 减少连接数
+    pub fn decrement_connections(&self) {
+        // 使用 saturating_sub 防止下溢
+        self.stats.connections.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |x| Some(x.saturating_sub(1))
+        ).ok();
+    }
+
     /// 重置统计信息
     pub fn reset_stats(&self) {
         self.stats.upload.store(0, Ordering::Relaxed);
@@ -111,6 +121,25 @@ impl ProxyStats {
             download_bytes: self.download.load(Ordering::Relaxed),
             connections: self.connections.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// 连接守卫，使用 RAII 模式确保连接结束时减少计数
+pub struct ConnectionGuard<'a> {
+    status: &'a ProxyStatus,
+}
+
+impl<'a> ConnectionGuard<'a> {
+    /// 创建新的连接守卫（此时连接数已经增加）
+    pub fn new(status: &'a ProxyStatus) -> Self {
+        Self { status }
+    }
+}
+
+impl<'a> Drop for ConnectionGuard<'a> {
+    /// 当守卫被销毁时，自动减少连接计数
+    fn drop(&mut self) {
+        self.status.decrement_connections();
     }
 }
 
@@ -162,5 +191,59 @@ mod tests {
         assert_eq!(stats.upload_bytes, 0);
         assert_eq!(stats.download_bytes, 0);
         assert_eq!(stats.connections, 0);
+    }
+
+    #[test]
+    fn test_connections_decrement() {
+        let status = ProxyStatus::new();
+
+        // 增加连接数
+        status.increment_connections();
+        assert_eq!(status.get_stats().connections, 1);
+
+        // 减少连接数
+        status.decrement_connections();
+        assert_eq!(status.get_stats().connections, 0);
+
+        // 多次增加和减少
+        status.increment_connections();
+        status.increment_connections();
+        status.increment_connections();
+        assert_eq!(status.get_stats().connections, 3);
+
+        status.decrement_connections();
+        status.decrement_connections();
+        assert_eq!(status.get_stats().connections, 1);
+    }
+
+    #[test]
+    fn test_connection_guard() {
+        let status = ProxyStatus::new();
+
+        // 创建守卫前
+        assert_eq!(status.get_stats().connections, 0);
+
+        // 增加连接
+        status.increment_connections();
+        assert_eq!(status.get_stats().connections, 1);
+
+        // 创建守卫（模拟连接处理）
+        {
+            let _guard = ConnectionGuard::new(&status);
+            // 在作用域内，连接数仍然是1
+            assert_eq!(status.get_stats().connections, 1);
+        } // guard 离开作用域，自动减少连接数
+
+        // 守卫销毁后，连接数应该减少
+        assert_eq!(status.get_stats().connections, 0);
+    }
+
+    #[test]
+    fn test_connection_guard_safety() {
+        let status = ProxyStatus::new();
+
+        // 测试防止下溢
+        status.decrement_connections(); // 从0减少
+        assert_eq!(status.get_stats().connections, 0); // 应该保持0，不会变成负数
     }
 }
