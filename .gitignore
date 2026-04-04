@@ -4,7 +4,7 @@
 **/*.rs.bk
 **/*.rlib
 **/*.rmeta
- Cargo.lock
+Cargo.lock
 
 # macOS
 .DS_Store
@@ -24,3 +24,39 @@
 # Test
 /tmp/
 *.html
+
+# Node.js / Frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Build outputs
+**/dist/
+**/build/
+**/.next/
+**/.nuxt/
+**/.vite/
+
+# Package manager locks (keep root Cargo.lock)
+**/pnpm-lock.yaml
+**/package-lock.json
+**/yarn.lock
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Test scripts
+test_*.sh
+test_bind*.rs
+convert-*.sh
+convert-*.js
+convert-*.cjs
+
+# Examples
+examples/
+
+# Broken files
+*.broken
