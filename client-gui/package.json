@@ -1,0 +1,15 @@
+{
+  "name": "socks5-proxy-client",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "cd ui && pnpm dev",
+    "build": "cd ui && pnpm build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
