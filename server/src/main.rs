@@ -10,9 +10,8 @@ mod config;
 mod server;
 
 use anyhow::Result;
-use tracing::{info, error};
+use tracing::info;
 use tracing_subscriber;
-use std::path::Path;
 
 #[tokio::main]
 async fn main() -> Result<()> {

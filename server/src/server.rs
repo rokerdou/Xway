@@ -11,8 +11,10 @@ use shared::{AuthPacket, KingObj, Result, TargetAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 
 /// SOCKS5代理服务端
 pub struct ProxyServer {
@@ -123,6 +125,35 @@ async fn handle_client_connection(
     Ok(())
 }
 
+/// 设置 TCP Keep-Alive
+///
+/// 启用 TCP Keep-Alive 以检测死连接（网络中断）
+/// - 60 秒后开始探测
+/// - 每 10 秒探测一次
+fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+    use socket2::SockRef;
+
+    let socket = SockRef::from(stream);
+
+    #[cfg(unix)]
+    {
+        use socket2::TcpKeepalive;
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(60))    // 60 秒后开始探测
+            .with_interval(Duration::from_secs(10)); // 每 10 秒探测一次
+
+        socket.set_tcp_keepalive(&keepalive)?;
+        debug!("✓ TCP Keep-Alive 已启用 (60s start, 10s interval)");
+    }
+
+    #[cfg(not(unix))]
+    {
+        debug!("✓ TCP Keep-Alive 设置（非Unix系统）");
+    }
+
+    Ok(())
+}
+
 /// 读取目标地址（加密的）
 async fn read_target_address(
     stream: &mut TcpStream,
@@ -207,6 +238,14 @@ async fn relay_with_encryption(
     mut target_stream: TcpStream,
     config: &ServerConfig,
 ) -> Result<()> {
+    // 启用 TCP Keep-Alive
+    if let Err(e) = set_tcp_keepalive(&client_stream) {
+        debug!("设置客户端 Keep-Alive 失败: {}", e);
+    }
+    if let Err(e) = set_tcp_keepalive(&target_stream) {
+        debug!("设置目标 Keep-Alive 失败: {}", e);
+    }
+
     let mut client_decryptor = KingObj::new();
     let mut client_encryptor = KingObj::new();
 
@@ -214,6 +253,9 @@ async fn relay_with_encryption(
     let (mut target_reader, mut target_writer) = target_stream.split();
 
     let buffer_size = config.relay.max_buffer_size;
+    let read_timeout = Duration::from_secs(config.server.timeout_seconds);
+
+    debug!("✓ 读写超时设置为: {} 秒", config.server.timeout_seconds);
 
     // 客户端 -> 目标（解密）
     let c2t = async move {
@@ -222,10 +264,14 @@ async fn relay_with_encryption(
         let mut buffer = Vec::with_capacity(buffer_size);
 
         loop {
-            // 读取加密数据长度
-            let n = client_reader.read_exact(&mut len_buffer).await;
-            if n.is_err() {
-                break;
+            // 【修复】添加超时：读取加密数据长度
+            let result = timeout(read_timeout, client_reader.read_exact(&mut len_buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("客户端->目标: 读取长度超时或错误，断开连接");
+                    break;
+                }
             }
 
             let len = u16::from_be_bytes(len_buffer) as usize;
@@ -234,9 +280,14 @@ async fn relay_with_encryption(
             buffer.clear();
             buffer.resize(len, 0);
 
-            // 读取加密数据
-            if client_reader.read_exact(&mut buffer).await.is_err() {
-                break;
+            // 【修复】添加超时：读取加密数据
+            let result = timeout(read_timeout, client_reader.read_exact(&mut buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("客户端->目标: 读取数据超时或错误，断开连接");
+                    break;
+                }
             }
 
             debug!("客户端->目标: {} 字节（加密）", len);
@@ -244,9 +295,14 @@ async fn relay_with_encryption(
             // 解密数据
             client_decryptor.decode(&mut buffer, len)?;
 
-            // 发送到目标服务器
-            if target_writer.write_all(&buffer).await.is_err() {
-                break;
+            // 【修复】添加超时：发送到目标服务器
+            let result = timeout(read_timeout, target_writer.write_all(&buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("客户端->目标: 发送数据超时或错误，断开连接");
+                    break;
+                }
             }
         }
 
@@ -258,25 +314,45 @@ async fn relay_with_encryption(
         let mut buffer = vec![0u8; buffer_size];
 
         loop {
-            // 读取目标服务器数据
-            let n = target_reader.read(&mut buffer).await;
-            if n.is_err() || n.as_ref().unwrap() == &0 {
+            // 【修复】添加超时：读取目标服务器数据
+            let result = timeout(read_timeout, target_reader.read(&mut buffer)).await;
+            let n = match result {
+                Ok(Ok(n)) => n,
+                _ => {
+                    debug!("目标->客户端: 读取数据超时或错误，断开连接");
+                    break;
+                }
+            };
+
+            if n == 0 {
+                debug!("目标->客户端: 对端关闭连接");
                 break;
             }
-            let n = n.unwrap();
 
             debug!("目标->客户端: {} 字节", n);
 
             // 加密数据
             client_encryptor.encode(&mut buffer, n)?;
 
-            // 发送到客户端（添加长度前缀）
+            // 【修复】添加超时：发送长度前缀到客户端
             let len = n as u16;
-            if client_writer.write_all(&len.to_be_bytes()).await.is_err() {
-                break;
+            let result = timeout(read_timeout, client_writer.write_all(&len.to_be_bytes())).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("目标->客户端: 发送长度超时或错误，断开连接");
+                    break;
+                }
             }
-            if client_writer.write_all(&buffer[..n]).await.is_err() {
-                break;
+
+            // 【修复】添加超时：发送数据到客户端
+            let result = timeout(read_timeout, client_writer.write_all(&buffer[..n])).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("目标->客户端: 发送数据超时或错误，断开连接");
+                    break;
+                }
             }
         }
 

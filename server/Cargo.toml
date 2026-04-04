@@ -32,3 +32,4 @@ anyhow = { workspace = true }
 
 # 网络
 bytes = { workspace = true }
+socket2 = "0.5"

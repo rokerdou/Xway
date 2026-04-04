@@ -5,9 +5,11 @@ use shared::{AuthPacket, KingObj};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 
 /// SOCKS5代理客户端
 pub struct ProxyClient {
@@ -163,6 +165,35 @@ impl ProxyClient {
 
         Ok(())
     }
+}
+
+/// 设置 TCP Keep-Alive
+///
+/// 启用 TCP Keep-Alive 以检测死连接（网络中断）
+/// - 60 秒后开始探测
+/// - 每 10 秒探测一次
+fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+    use socket2::SockRef;
+
+    let socket = SockRef::from(stream);
+
+    #[cfg(unix)]
+    {
+        use socket2::TcpKeepalive;
+        let keepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(60))    // 60 秒后开始探测
+            .with_interval(Duration::from_secs(10)); // 每 10 秒探测一次
+
+        socket.set_tcp_keepalive(&keepalive)?;
+        debug!("✓ TCP Keep-Alive 已启用 (60s start, 10s interval)");
+    }
+
+    #[cfg(not(unix))]
+    {
+        debug!("✓ TCP Keep-Alive 设置（非Unix系统）");
+    }
+
+    Ok(())
 }
 
 /// 使用已绑定的listener运行代理服务器
@@ -425,11 +456,23 @@ async fn relay_with_encryption(
     remote_stream: TcpStream,
     status: &ProxyStatus,
 ) -> anyhow::Result<()> {
+    // 启用 TCP Keep-Alive
+    if let Err(e) = set_tcp_keepalive(&local_stream) {
+        debug!("设置本地 Keep-Alive 失败: {}", e);
+    }
+    if let Err(e) = set_tcp_keepalive(&remote_stream) {
+        debug!("设置远程 Keep-Alive 失败: {}", e);
+    }
+
     let mut local_encryptor = KingObj::new();
     let mut local_decryptor = KingObj::new();
 
     let (mut local_reader, mut local_writer) = local_stream.into_split();
     let (mut remote_reader, mut remote_writer) = remote_stream.into_split();
+
+    let read_timeout = Duration::from_secs(80); // 读写超时 80 秒
+
+    debug!("✓ 读写超时设置为: {} 秒", 80);
 
     // 本地 -> 远程（加密）
     let l2r = async move {
@@ -437,8 +480,18 @@ async fn relay_with_encryption(
         let mut data = Vec::with_capacity(8192);
 
         loop {
-            let n = local_reader.read(&mut buffer).await?;
+            // 【修复】添加超时：读取本地数据
+            let result = timeout(read_timeout, local_reader.read(&mut buffer)).await;
+            let n = match result {
+                Ok(Ok(n)) => n,
+                _ => {
+                    debug!("本地->远程: 读取数据超时或错误，断开连接");
+                    break;
+                }
+            };
+
             if n == 0 {
+                debug!("本地->远程: 本地关闭连接");
                 break;
             }
 
@@ -451,8 +504,26 @@ async fn relay_with_encryption(
             local_encryptor.encode(&mut data, n)?;
 
             let len = data.len() as u16;
-            remote_writer.write_all(&len.to_be_bytes()).await?;
-            remote_writer.write_all(&data).await?;
+
+            // 【修复】添加超时：发送长度前缀
+            let result = timeout(read_timeout, remote_writer.write_all(&len.to_be_bytes())).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("本地->远程: 发送长度超时或错误，断开连接");
+                    break;
+                }
+            }
+
+            // 【修复】添加超时：发送数据
+            let result = timeout(read_timeout, remote_writer.write_all(&data)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("本地->远程: 发送数据超时或错误，断开连接");
+                    break;
+                }
+            }
 
             status.add_upload(n as u64);
         }
@@ -466,27 +537,43 @@ async fn relay_with_encryption(
         let mut buffer = Vec::with_capacity(8192);
 
         loop {
-            match remote_reader.read_exact(&mut len_buffer).await {
-                Ok(_) => {}
-                Err(_) => break,
+            // 【修复】添加超时：读取长度前缀
+            let result = timeout(read_timeout, remote_reader.read_exact(&mut len_buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("远程->本地: 读取长度超时或错误，断开连接");
+                    break;
+                }
             }
+
             let len = u16::from_be_bytes(len_buffer) as usize;
 
             buffer.clear();
             buffer.resize(len, 0);
 
-            match remote_reader.read_exact(&mut buffer).await {
-                Ok(_) => {}
-                Err(_) => break,
+            // 【修复】添加超时：读取加密数据
+            let result = timeout(read_timeout, remote_reader.read_exact(&mut buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("远程->本地: 读取数据超时或错误，断开连接");
+                    break;
+                }
             }
 
             debug!("远程->本地: {} 字节（加密）", len);
 
             local_decryptor.decode(&mut buffer, len)?;
 
-            match local_writer.write_all(&buffer).await {
-                Ok(_) => {}
-                Err(_) => break,
+            // 【修复】添加超时：发送到本地
+            let result = timeout(read_timeout, local_writer.write_all(&buffer)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                _ => {
+                    debug!("远程->本地: 发送数据超时或错误，断开连接");
+                    break;
+                }
             }
 
             status.add_download(len as u64);
