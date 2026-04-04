@@ -1,5 +1,5 @@
 [server]
-remote_server = "72.61.180.33"
+remote_server = "124.156.132.195"
 remote_port = 1080
 
 [local]
