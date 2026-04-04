@@ -1,7 +1,5 @@
-# 客户端配置
-
 [server]
-remote_server = "127.0.0.1"
+remote_server = "72.61.180.33"
 remote_port = 1080
 
 [local]
@@ -17,4 +15,4 @@ enabled = true
 shared_secret = "my_secret_key_12345"
 username = "client"
 sequence = 1
-max_time_diff_secs = 60
+max_time_diff_secs = 300
