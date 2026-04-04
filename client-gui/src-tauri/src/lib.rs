@@ -527,30 +527,15 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     use tauri::{
         menu::{Menu, MenuItem},
         tray::TrayIconBuilder,
-        image::Image,
     };
 
     // 创建菜单项
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
 
-    // 加载托盘图标（使用 icon@2xTemplate.png）
-    // 直接使用源代码目录的图标（开发模式）
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let icon_path = manifest_dir.join("icons/icon@2xTemplate.png");
-
-    tracing::info!("🖼️  尝试加载托盘图标: {:?}", icon_path);
-
-    let tray_icon = if icon_path.exists() {
-        tracing::info!("✅ 找到图标文件，加载中...");
-        // 读取 PNG 文件
-        let png_data = std::fs::read(&icon_path)?;
-        Image::new_owned(png_data, 64, 64)
-    } else {
-        tracing::warn!("⚠️  图标文件不存在: {:?}, 使用默认图标", icon_path);
-        // 回退到默认窗口图标
-        app.default_window_icon().unwrap().clone()
-    };
+    // 暂时使用默认窗口图标，确保托盘图标可见
+    let tray_icon = app.default_window_icon().unwrap().clone();
+    tracing::info!("🖼️  使用默认窗口图标作为托盘图标");
 
     // 创建托盘图标
     let _tray = TrayIconBuilder::new()
@@ -591,6 +576,6 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         })
         .build(app)?;
 
-    tracing::info!("✅ 系统托盘已创建（使用 Tauri v2 API，新图标 icon@2xTemplate.png）");
+    tracing::info!("✅ 系统托盘已创建（使用 Tauri v2 API）");
     Ok(())
 }
