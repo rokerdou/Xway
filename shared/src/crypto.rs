@@ -47,19 +47,21 @@ impl KingObj {
             ));
         }
 
+        let start_index = self.encode_index;
+
         // SIMD优化路径（x86_64 with AVX2）
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
-                unsafe { encode_avx2(data, len); }
+                unsafe { encode_avx2(data, len, start_index); }
             } else {
-                encode_scalar(data, len);
+                encode_scalar(data, len, start_index);
             }
         }
 
         #[cfg(not(target_arch = "x86_64"))]
         {
-            encode_scalar(data, len);
+            encode_scalar(data, len, start_index);
         }
 
         self.encode_index = (self.encode_index + len) % 256;
@@ -73,19 +75,21 @@ impl KingObj {
             ));
         }
 
+        let start_index = self.decode_index;
+
         // SIMD优化路径（x86_64 with AVX2）
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
-                unsafe { decode_avx2(data, len); }
+                unsafe { decode_avx2(data, len, start_index); }
             } else {
-                decode_scalar(data, len);
+                decode_scalar(data, len, start_index);
             }
         }
 
         #[cfg(not(target_arch = "x86_64"))]
         {
-            decode_scalar(data, len);
+            decode_scalar(data, len, start_index);
         }
 
         self.decode_index = (self.decode_index + len) % 256;
@@ -127,16 +131,22 @@ impl Default for KingObj {
 // ============================================================================
 
 #[inline(always)]
-fn encode_scalar(data: &mut [u8], len: usize) {
+fn encode_scalar(data: &mut [u8], len: usize, start_index: usize) {
     for i in 0..len {
-        data[i] = ENMAP[data[i] as usize];
+        // 计算位置偏移（抗频率分析）
+        let offset = ((start_index + i) % 256) as u8;
+        // 先XOR偏移值，再查表
+        data[i] = ENMAP[(data[i] ^ offset) as usize];
     }
 }
 
 #[inline(always)]
-fn decode_scalar(data: &mut [u8], len: usize) {
+fn decode_scalar(data: &mut [u8], len: usize, start_index: usize) {
     for i in 0..len {
-        data[i] = DEMAP[data[i] as usize];
+        // 计算位置偏移（抗频率分析）
+        let offset = ((start_index + i) % 256) as u8;
+        // 先查表，再XOR偏移值
+        data[i] = DEMAP[data[i] as usize] ^ offset;
     }
 }
 
@@ -198,7 +208,7 @@ fn get_demap_shuffle() -> &'static [__m256i; 16] {
 }
 
 #[cfg(target_arch = "x86_64")]
-unsafe fn encode_avx2(data: &mut [u8], len: usize) {
+unsafe fn encode_avx2(data: &mut [u8], len: usize, start_index: usize) {
     let shuffle_tables = get_enmap_shuffle();
     let data_ptr = data.as_mut_ptr();
 
@@ -208,8 +218,22 @@ unsafe fn encode_avx2(data: &mut [u8], len: usize) {
         // 加载32字节输入
         let input = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
 
-        // 并行查表：高4位选子表，低4位做shuffle索引
-        let result = lookup_256_avx2(input, shuffle_tables);
+        // 生成位置偏移向量（抗频率分析）
+        let base = (start_index + i) % 256;
+        let offset = _mm256_setr_epi8(
+            base as i8, (base+1) as i8, (base+2) as i8, (base+3) as i8,
+            (base+4) as i8, (base+5) as i8, (base+6) as i8, (base+7) as i8,
+            (base+8) as i8, (base+9) as i8, (base+10) as i8, (base+11) as i8,
+            (base+12) as i8, (base+13) as i8, (base+14) as i8, (base+15) as i8,
+            (base+16) as i8, (base+17) as i8, (base+18) as i8, (base+19) as i8,
+            (base+20) as i8, (base+21) as i8, (base+22) as i8, (base+23) as i8,
+            (base+24) as i8, (base+25) as i8, (base+26) as i8, (base+27) as i8,
+            (base+28) as i8, (base+29) as i8, (base+30) as i8, (base+31) as i8,
+        );
+
+        // 先XOR位置偏移，再查表
+        let mixed = _mm256_xor_si256(input, offset);
+        let result = lookup_256_avx2(mixed, shuffle_tables);
 
         // 存储32字节结果
         _mm256_storeu_si256(data_ptr.add(i) as *mut __m256i, result);
@@ -218,23 +242,37 @@ unsafe fn encode_avx2(data: &mut [u8], len: usize) {
 
     // 处理16字节块
     while i + 16 <= len {
-        let input = _mm256_castsi128_si256(_mm_loadu_si128(data_ptr.add(i) as *const __m128i));
-        let result_256 = lookup_256_avx2(input, shuffle_tables);
+        let input = _mm_loadu_si128(data_ptr.add(i) as *const __m128i);
+
+        // 生成16字节位置偏移
+        let base = (start_index + i) % 256;
+        let offset = _mm_setr_epi8(
+            base as i8, (base+1) as i8, (base+2) as i8, (base+3) as i8,
+            (base+4) as i8, (base+5) as i8, (base+6) as i8, (base+7) as i8,
+            (base+8) as i8, (base+9) as i8, (base+10) as i8, (base+11) as i8,
+            (base+12) as i8, (base+13) as i8, (base+14) as i8, (base+15) as i8,
+        );
+
+        // 先XOR位置偏移，再查表
+        let mixed = _mm_xor_si128(input, offset);
+        let mixed_256 = _mm256_castsi128_si256(mixed);
+        let result_256 = lookup_256_avx2(mixed_256, shuffle_tables);
         let result = _mm256_castsi256_si128(result_256);
         _mm_storeu_si128(data_ptr.add(i) as *mut __m128i, result);
         i += 16;
     }
 
-    // 处理剩余字节（标量回退）
+    // 处理剩余字节（标量回退，使用位置偏移）
     let enmap: &[u8; 256] = &ENMAP;
     while i < len {
-        *data_ptr.add(i) = enmap[*data_ptr.add(i) as usize];
+        let offset = ((start_index + i) % 256) as u8;
+        *data_ptr.add(i) = enmap[(*data_ptr.add(i) ^ offset) as usize];
         i += 1;
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-unsafe fn decode_avx2(data: &mut [u8], len: usize) {
+unsafe fn decode_avx2(data: &mut [u8], len: usize, start_index: usize) {
     let shuffle_tables = get_demap_shuffle();
     let data_ptr = data.as_mut_ptr();
 
@@ -242,7 +280,24 @@ unsafe fn decode_avx2(data: &mut [u8], len: usize) {
     let mut i = 0;
     while i + 32 <= len {
         let input = _mm256_loadu_si256(data_ptr.add(i) as *const __m256i);
-        let result = lookup_256_avx2(input, shuffle_tables);
+
+        // 生成位置偏移向量（抗频率分析）
+        let base = (start_index + i) % 256;
+        let offset = _mm256_setr_epi8(
+            base as i8, (base+1) as i8, (base+2) as i8, (base+3) as i8,
+            (base+4) as i8, (base+5) as i8, (base+6) as i8, (base+7) as i8,
+            (base+8) as i8, (base+9) as i8, (base+10) as i8, (base+11) as i8,
+            (base+12) as i8, (base+13) as i8, (base+14) as i8, (base+15) as i8,
+            (base+16) as i8, (base+17) as i8, (base+18) as i8, (base+19) as i8,
+            (base+20) as i8, (base+21) as i8, (base+22) as i8, (base+23) as i8,
+            (base+24) as i8, (base+25) as i8, (base+26) as i8, (base+27) as i8,
+            (base+28) as i8, (base+29) as i8, (base+30) as i8, (base+31) as i8,
+        );
+
+        // 先查表，再XOR位置偏移
+        let mapped = lookup_256_avx2(input, shuffle_tables);
+        let result = _mm256_xor_si256(mapped, offset);
+
         _mm256_storeu_si256(data_ptr.add(i) as *mut __m256i, result);
         i += 32;
     }
@@ -250,16 +305,28 @@ unsafe fn decode_avx2(data: &mut [u8], len: usize) {
     // 处理16字节块
     while i + 16 <= len {
         let input = _mm256_castsi128_si256(_mm_loadu_si128(data_ptr.add(i) as *const __m128i));
-        let result_256 = lookup_256_avx2(input, shuffle_tables);
-        let result = _mm256_castsi256_si128(result_256);
+
+        // 生成16字节位置偏移
+        let base = (start_index + i) % 256;
+        let offset = _mm_setr_epi8(
+            base as i8, (base+1) as i8, (base+2) as i8, (base+3) as i8,
+            (base+4) as i8, (base+5) as i8, (base+6) as i8, (base+7) as i8,
+            (base+8) as i8, (base+9) as i8, (base+10) as i8, (base+11) as i8,
+            (base+12) as i8, (base+13) as i8, (base+14) as i8, (base+15) as i8,
+        );
+
+        let mapped_256 = lookup_256_avx2(input, shuffle_tables);
+        let mapped = _mm256_castsi256_si128(mapped_256);
+        let result = _mm_xor_si128(mapped, offset);
         _mm_storeu_si128(data_ptr.add(i) as *mut __m128i, result);
         i += 16;
     }
 
-    // 处理剩余字节（标量回退）
+    // 处理剩余字节（标量回退，使用位置偏移）
     let demap: &[u8; 256] = &DEMAP;
     while i < len {
-        *data_ptr.add(i) = demap[*data_ptr.add(i) as usize];
+        let offset = ((start_index + i) % 256) as u8;
+        *data_ptr.add(i) = demap[*data_ptr.add(i) as usize] ^ offset;
         i += 1;
     }
 }
