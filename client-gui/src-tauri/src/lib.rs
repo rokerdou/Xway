@@ -507,6 +507,19 @@ pub fn run() {
 
             app.manage(state);
 
+            // 设置 macOS 不显示在 Dock 中
+            #[cfg(target_os = "macos")]
+            {
+                unsafe {
+                    use objc::{msg_send, sel, sel_impl, class};
+                    let ns_app = class!(NSApplication);
+                    let shared_app: *mut objc::runtime::Object = msg_send![ns_app, sharedApplication];
+                    let ns_application_activation_policy_accessory = 2u64; // NSApplicationActivationPolicyAccessory
+                    let _: () = msg_send![shared_app, setActivationPolicy: ns_application_activation_policy_accessory];
+                }
+                tracing::info!("✅ 设置 macOS 应用不在 Dock 中显示");
+            }
+
             // 创建系统托盘
             #[cfg(desktop)]
             {
