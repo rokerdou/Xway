@@ -25,11 +25,11 @@ function App() {
   const handleCloseWindow = async () => {
     console.log('🖱️ handleCloseWindow 被调用');
     try {
-      console.log('⏳ 准备关闭窗口...');
-      await invoke('close_window');
-      console.log('✅ 窗口关闭成功');
+      console.log('⏳ 准备关闭系统代理并退出应用...');
+      await invoke('quit_app');
+      console.log('✅ 应用退出成功');
     } catch (e) {
-      console.error('❌ 关闭窗口失败:', e);
+      console.error('❌ 退出应用失败:', e);
     }
   };
 
@@ -316,11 +316,11 @@ function App() {
             </svg>
           </button>
 
-          {/* 关闭按钮 */}
+          {/* 退出按钮 */}
           <button
             onClick={handleCloseWindow}
             className="text-gray-400 hover:text-red-500 hover:bg-gray-700 rounded px-2 py-1 transition-colors"
-            title="关闭窗口"
+            title="退出应用（会自动关闭系统代理）"
             style={{ width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

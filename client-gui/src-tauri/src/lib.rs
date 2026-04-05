@@ -462,6 +462,25 @@ async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 退出应用（先关闭系统代理）
+#[tauri::command]
+async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    // 先尝试关闭系统代理
+    let config_path = ClientConfig::default_config_path();
+    if let Ok(config) = ClientConfig::from_file(&config_path) {
+        if let Some(_server) = config.get_active_server() {
+            let port = config.local.listen_port;
+            // 尝试关闭系统代理，忽略错误
+            let _ = set_system_proxy(false, port).await;
+            tracing::info!("✅ 系统代理已关闭");
+        }
+    }
+
+    // 退出应用
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -495,7 +514,12 @@ pub fn run() {
                 if let Err(e) = create_tray(app_handle) {
                     tracing::error!("❌ 创建托盘失败: {}", e);
                 }
-                tracing::info!("🎯 主窗口应该已经创建");
+
+                // 隐藏主窗口，只在托盘显示
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                    tracing::info!("✅ 应用启动：隐藏主窗口，只显示托盘图标");
+                }
             }
 
             Ok(())
@@ -516,6 +540,7 @@ pub fn run() {
             check_system_proxy_status,
             close_window,
             minimize_window,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -545,8 +570,11 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         .tooltip("SOCKS5 代理客户端")
         .on_menu_event(|app: &tauri::AppHandle, event: tauri::menu::MenuEvent| match event.id.as_ref() {
             "quit" => {
-                tracing::info!("📋 点击退出菜单");
-                let _ = app.exit(0);
+                tracing::info!("📋 点击退出菜单，准备退出...");
+                // 调用退出命令，会先关闭系统代理
+                tauri::async_runtime::block_on(async {
+                    let _ = quit_app(app.clone()).await;
+                });
             }
             _ => {}
         })
