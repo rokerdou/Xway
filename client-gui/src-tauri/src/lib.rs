@@ -507,20 +507,6 @@ pub fn run() {
 
             app.manage(state);
 
-            // 设置 macOS activation policy
-            // 使用 Regular (0) 允许窗口显示，配合 Info.plist 中的 LSUIElement 隐藏 Dock 图标
-            #[cfg(target_os = "macos")]
-            {
-                unsafe {
-                    use objc::{msg_send, sel, sel_impl, class};
-                    let ns_app = class!(NSApplication);
-                    let shared_app: *mut objc::runtime::Object = msg_send![ns_app, sharedApplication];
-                    let ns_application_activation_policy_regular = 0u64; // NSApplicationActivationPolicyRegular
-                    let _: () = msg_send![shared_app, setActivationPolicy: ns_application_activation_policy_regular];
-                }
-                tracing::info!("✅ 设置 macOS 应用激活策略");
-            }
-
             // 创建系统托盘
             #[cfg(desktop)]
             {
