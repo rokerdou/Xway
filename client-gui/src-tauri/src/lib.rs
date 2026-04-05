@@ -514,12 +514,7 @@ pub fn run() {
                 if let Err(e) = create_tray(app_handle) {
                     tracing::error!("❌ 创建托盘失败: {}", e);
                 }
-
-                // 隐藏主窗口，只在托盘显示
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.hide();
-                    tracing::info!("✅ 应用启动：隐藏主窗口，只显示托盘图标");
-                }
+                tracing::info!("✅ 应用启动：窗口可见，托盘图标已创建");
             }
 
             Ok(())
