@@ -3,7 +3,7 @@
 //! 使用HMAC-SHA256实现客户端-服务端认证
 //! 认证包格式：长度(2) + username_len(1) + username + timestamp(8) + sequence(8) + hmac(32)
 
-use crate::{KingObj, ProtocolError, Result};
+use crate::{KingObj, ProtocolError, Result, PROTOCOL_PREFIX, adjust_popcount, reverse_popcount_adjust};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -179,7 +179,10 @@ impl AuthPacket {
 
     /// 序列化并加密认证包
     ///
-    /// 返回格式：长度(2) + 加密数据
+    /// 返回格式：[协议前缀] [长度(2)] [加密数据]
+    ///
+    /// 协议前缀满足GFW Ex2规则（前6个可打印ASCII字符）
+    /// 注意：popcount调整暂时禁用，待算法完善后再启用
     #[inline(always)]
     pub fn serialize_encrypted(&self, encryptor: &mut KingObj) -> Result<Vec<u8>> {
         // 先序列化
@@ -189,9 +192,16 @@ impl AuthPacket {
         let len = data.len();
         encryptor.encode(&mut data, len)?;
 
+        // 构建最终数据：长度(2) + 加密数据
+        let mut result = Vec::with_capacity(PROTOCOL_PREFIX.len() + 2 + len);
+
+        // 方案1：添加协议前缀（满足Ex2: 前6个可打印ASCII）
+        result.extend_from_slice(PROTOCOL_PREFIX);
+
         // 添加长度前缀（2字节，大端序）
-        let mut result = Vec::with_capacity(2 + len);
         result.extend_from_slice(&(len as u16).to_be_bytes());
+
+        // 添加加密数据
         result.extend_from_slice(&data);
 
         Ok(result)
@@ -200,22 +210,40 @@ impl AuthPacket {
     /// 解密并反序列化认证包
     ///
     /// # 参数
-    /// - `data`: 包含长度前缀的数据（长度(2) + 加密数据）
+    /// - `data`: [协议前缀] [长度(2)] [加密数据]
     #[inline(always)]
     pub fn deserialize_encrypted(data: &[u8], decryptor: &mut KingObj) -> Result<Self> {
-        if data.len() < 2 {
+        // 验证并跳过协议前缀
+        if data.len() < PROTOCOL_PREFIX.len() {
             return Err(ProtocolError::InvalidLength.into());
         }
+
+        let prefix = &data[..PROTOCOL_PREFIX.len()];
+        if prefix != PROTOCOL_PREFIX {
+            return Err(ProtocolError::GeneralFailure(format!(
+                "无效的协议前缀: {:?}, 期望: {:?}",
+                prefix, PROTOCOL_PREFIX
+            )).into());
+        }
+
+        let data_without_prefix = &data[PROTOCOL_PREFIX.len()..];
 
         // 读取长度
-        let len = u16::from_be_bytes([data[0], data[1]]) as usize;
-
-        if data.len() < 2 + len {
+        if data_without_prefix.len() < 2 {
             return Err(ProtocolError::InvalidLength.into());
         }
 
-        // 解密数据
-        let mut decrypted = data[2..2 + len].to_vec();
+        let len = u16::from_be_bytes([data_without_prefix[0], data_without_prefix[1]]) as usize;
+
+        if data_without_prefix.len() < 2 + len {
+            return Err(ProtocolError::InvalidLength.into());
+        }
+
+        // 读取加密数据
+        let encrypted = &data_without_prefix[2..2 + len];
+
+        // 解密
+        let mut decrypted = encrypted.to_vec();
         decryptor.decode(&mut decrypted, len)?;
 
         // 反序列化
@@ -309,10 +337,10 @@ mod tests {
         let serialized = packet.serialize();
         assert_eq!(serialized.len(), 57);
 
-        // 加密后的长度应该是：2 (length prefix) + 57 (data) = 59
+        // 加密后的长度应该是：6 (前缀) + 2 (length prefix) + 57 (data) = 65
         let mut encryptor = KingObj::new();
         let encrypted = packet.serialize_encrypted(&mut encryptor).unwrap();
-        assert_eq!(encrypted.len(), 59);
+        assert_eq!(encrypted.len(), 65);
     }
 
     #[test]
@@ -372,5 +400,76 @@ mod tests {
         packet.timestamp = packet.timestamp.saturating_sub(301);
         let result = packet.verify(shared_secret, 300);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_protocol_prefix_integration() {
+        // 测试协议前缀与加密集成
+        use crate::PROTOCOL_PREFIX;
+
+        let shared_secret = b"test_secret_key_12345";
+        let username = "testuser".to_string();
+        let sequence = 12345;
+
+        let packet = AuthPacket::new(username.clone(), shared_secret, sequence);
+
+        // 序列化并加密
+        let mut encryptor = KingObj::new();
+        let encrypted = packet.serialize_encrypted(&mut encryptor).unwrap();
+
+        // 验证包含协议前缀
+        assert!(encrypted.starts_with(PROTOCOL_PREFIX),
+                "加密数据应该以协议前缀开头");
+
+        // 解密并反序列化
+        let mut decryptor = KingObj::new();
+        decryptor.set_seed(encryptor.seed());
+        let decrypted = AuthPacket::deserialize_encrypted(&encrypted, &mut decryptor).unwrap();
+
+        // 验证数据正确
+        assert_eq!(decrypted.username, username);
+        assert_eq!(decrypted.sequence, sequence);
+    }
+
+    #[test]
+    fn test_protocol_prefix_length() {
+        // 验证协议前缀满足Ex2规则（>=6个可打印ASCII）
+        use crate::PROTOCOL_PREFIX;
+
+        assert!(PROTOCOL_PREFIX.len() >= 6,
+                "协议前缀至少需要6个字符，当前: {}", PROTOCOL_PREFIX.len());
+
+        // 验证所有字符都是可打印ASCII
+        for (i, &byte) in PROTOCOL_PREFIX.iter().enumerate() {
+            assert!(byte >= 0x20 && byte <= 0x7E,
+                    "前缀第{}个字节不是可打印ASCII: 0x{:02X}", i, byte);
+        }
+    }
+
+    #[test]
+    fn test_encrypted_packet_with_prefix_analysis() {
+        // 测试加密后的数据包特征
+        use crate::PROTOCOL_PREFIX;
+        use crate::popcount::{calculate_avg_popcount, is_in_gfw_range};
+
+        let shared_secret = b"test_secret_key_12345";
+        let username = "testuser".to_string();
+        let sequence = 12345;
+
+        let packet = AuthPacket::new(username, shared_secret, sequence);
+
+        // 序列化并加密
+        let mut encryptor = KingObj::new();
+        let encrypted = packet.serialize_encrypted(&mut encryptor).unwrap();
+
+        // 前缀部分应该有低popcount（可打印ASCII）
+        let prefix_data = &encrypted[..PROTOCOL_PREFIX.len()];
+        let prefix_popcount = calculate_avg_popcount(prefix_data);
+        assert!(!is_in_gfw_range(prefix_popcount),
+                "前缀的popcount应该在GFW检测范围外: {}", prefix_popcount);
+
+        // 验证整体数据长度
+        assert!(encrypted.len() > PROTOCOL_PREFIX.len() + 2,
+                "加密数据应该包含：前缀 + 长度(2) + 数据");
     }
 }

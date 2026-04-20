@@ -431,13 +431,17 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 
 /// 发送目标地址到远程服务端
 async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr) -> anyhow::Result<()> {
+    use shared::PROTOCOL_PREFIX;
+
     let addr_bytes = target_addr.encode();
     let mut king = KingObj::new();
     let mut encrypted = addr_bytes.clone();
     let encrypted_len = encrypted.len();
     king.encode(&mut encrypted, encrypted_len)?;
 
+    // 添加协议前缀（方案1：满足Ex2规则）
     let len = encrypted.len() as u16;
+    stream.write_all(PROTOCOL_PREFIX).await?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&encrypted).await?;
 

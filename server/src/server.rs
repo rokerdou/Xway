@@ -159,6 +159,22 @@ async fn read_target_address(
     stream: &mut TcpStream,
     decryptor: &mut KingObj,
 ) -> anyhow::Result<TargetAddr> {
+    use shared::PROTOCOL_PREFIX;
+
+    // 读取并验证协议前缀
+    let mut prefix_buffer = [0u8; PROTOCOL_PREFIX.len()];
+    stream.read_exact(&mut prefix_buffer).await?;
+
+    if prefix_buffer != *PROTOCOL_PREFIX {
+        return Err(anyhow::anyhow!(
+            "无效的协议前缀: {:?}, 期望: {:?}",
+            prefix_buffer,
+            PROTOCOL_PREFIX
+        ));
+    }
+
+    debug!("✓ 协议前缀验证成功");
+
     // 读取长度（2字节，大端序）
     let mut len_buffer = [0u8; 2];
     stream.read_exact(&mut len_buffer).await?;
@@ -384,8 +400,24 @@ async fn verify_client_auth(
     decryptor: &mut KingObj,
     config: &ServerConfig,
 ) -> anyhow::Result<String> {
+    use shared::PROTOCOL_PREFIX;
+
     // 🔍 打印服务端使用的密钥（用于调试）
     debug!("🔑 服务端使用密钥: \"{}\"", config.auth.shared_secret);
+
+    // 读取并验证协议前缀
+    let mut prefix_buffer = [0u8; PROTOCOL_PREFIX.len()];
+    stream.read_exact(&mut prefix_buffer).await?;
+
+    if prefix_buffer != *PROTOCOL_PREFIX {
+        return Err(anyhow::anyhow!(
+            "无效的协议前缀: {:?}, 期望: {:?}",
+            prefix_buffer,
+            PROTOCOL_PREFIX
+        ));
+    }
+
+    debug!("✓ 协议前缀验证成功");
 
     // 读取长度（2字节）
     let mut len_buffer = [0u8; 2];
