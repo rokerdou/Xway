@@ -7,9 +7,10 @@
 //! - 双向加密转发
 
 use crate::config::ServerConfig;
+use crate::defense::{DefenseManager, DefenseConfig};
 use shared::{AuthPacket, KingObj, Result, TargetAddr};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -22,6 +23,8 @@ pub struct ProxyServer {
     config: Arc<ServerConfig>,
     /// 连接信号量（限制最大连接数）
     semaphore: Arc<Semaphore>,
+    /// DPI防御管理器
+    defense: Arc<DefenseManager>,
 }
 
 impl ProxyServer {
@@ -29,9 +32,32 @@ impl ProxyServer {
     pub fn new(config: ServerConfig) -> Result<Self> {
         let semaphore = Arc::new(Semaphore::new(config.server.max_connections));
 
+        // 创建DPI防御管理器
+        let defense_config = DefenseConfig {
+            rate_limit_window: Duration::from_secs(60),
+            max_connections_per_window: 10,
+            max_auth_failures: 3,
+            initial_ban_duration: Duration::from_secs(300),
+            ban_multiplier: 2,
+            max_ban_duration: Duration::from_secs(86400),
+        };
+        let defense = Arc::new(DefenseManager::new(defense_config));
+
+        // 启动定期清理任务
+        let defense_cleanup = defense.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                defense_cleanup.cleanup().await;
+                debug!("已清理过期的防御记录");
+            }
+        });
+
         Ok(Self {
             config: Arc::new(config),
             semaphore,
+            defense,
         })
     }
 
@@ -58,11 +84,12 @@ impl ProxyServer {
             debug!("📥 新的客户端连接: {}", client_addr);
 
             // 处理连接
-            let config = self.config.clone(); // Arc克隆是零成本的
+            let config = self.config.clone();
+            let defense = self.defense.clone();
             tokio::spawn(async move {
                 let _permit = permit; // 持有许可直到连接结束
 
-                if let Err(e) = handle_client_connection(client_stream, client_addr, config).await {
+                if let Err(e) = handle_client_connection(client_stream, client_addr, config, defense).await {
                     error!("❌ 连接处理错误 [{}]: {}", client_addr, e);
                 }
             });
@@ -75,8 +102,22 @@ async fn handle_client_connection(
     mut client_stream: TcpStream,
     client_addr: std::net::SocketAddr,
     config: Arc<ServerConfig>,
+    defense: Arc<DefenseManager>,
 ) -> anyhow::Result<()> {
     debug!("🔌 开始处理客户端连接: {}", client_addr);
+
+    // 🛡️ 步骤0: DPI防御检查
+    let client_ip = client_addr.ip();
+    if defense.is_banned(client_ip).await {
+        warn!("⚠️  拒绝被封禁IP的连接: {}", client_addr);
+        return Err(anyhow::anyhow!("IP已被封禁"));
+    }
+
+    // 记录连接尝试
+    if let Err(e) = defense.record_connection(client_ip).await {
+        warn!("⚠️  连接被拒绝: {} - {}", client_addr, e);
+        return Err(anyhow::anyhow!(e));
+    }
 
     // 步骤1: 验证客户端认证（如果启用）
     if config.auth.enabled {
@@ -89,6 +130,8 @@ async fn handle_client_connection(
             }
             Err(e) => {
                 error!("❌ 客户端认证失败 [{}]: {}", client_addr, e);
+                // 记录鉴权失败
+                defense.record_auth_failure(client_ip).await;
                 return Err(e);
             }
         }
@@ -97,7 +140,7 @@ async fn handle_client_connection(
     // 步骤2: 读取目标地址（加密的）
     // 为目标地址创建新的解密器（每次连接使用独立的解密器）
     let mut addr_decryptor = KingObj::new();
-    let target_addr = match read_target_address(&mut client_stream, &mut addr_decryptor).await {
+    let target_addr = match read_target_address(&mut client_stream, &mut addr_decryptor, &config).await {
         Ok(addr) => addr,
         Err(e) => {
             error!("❌ 读取目标地址失败 [{}]: {}", client_addr, e);
@@ -158,22 +201,50 @@ fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 async fn read_target_address(
     stream: &mut TcpStream,
     decryptor: &mut KingObj,
+    config: &ServerConfig,
 ) -> anyhow::Result<TargetAddr> {
-    use shared::PROTOCOL_PREFIX;
+    use shared::{extract_auth_byte_from_prefix, verify_first_auth_byte};
 
-    // 读取并验证协议前缀
-    let mut prefix_buffer = [0u8; PROTOCOL_PREFIX.len()];
+    // 读取协议前缀（6字节，包含鉴权字节）
+    let mut prefix_buffer = [0u8; 6];
     stream.read_exact(&mut prefix_buffer).await?;
 
-    if prefix_buffer != *PROTOCOL_PREFIX {
-        return Err(anyhow::anyhow!(
-            "无效的协议前缀: {:?}, 期望: {:?}",
-            prefix_buffer,
-            PROTOCOL_PREFIX
-        ));
+    // 提取鉴权字节
+    let auth_byte = extract_auth_byte_from_prefix(&prefix_buffer)
+        .ok_or_else(|| anyhow::anyhow!("无效的协议前缀: {:?}", prefix_buffer))?;
+
+    debug!("📋 收到目标地址前缀: {:?}, 鉴权字节: {}", prefix_buffer, auth_byte);
+
+    // 从共享密钥中提取首字节用于鉴权
+    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+
+    // 验证首字节鉴权（仅基于时间和密钥）
+    let auth_valid = verify_first_auth_byte(
+        auth_byte,
+        shared_secret_byte,
+        config.auth.max_time_diff_secs,
+    );
+
+    if !auth_valid {
+        // 首字节鉴权失败，发送 HTTP 403 响应
+        warn!("⚠️  目标地址首字节鉴权失败: 接收={}", auth_byte);
+
+        let http_403_response = b"HTTP/1.1 403 Forbidden\r\n\
+                                   Content-Type: text/plain\r\n\
+                                   Content-Length: 9\r\n\
+                                   Connection: close\r\n\
+                                   \r\n\
+                                   Forbidden";
+        let _ = stream.write_all(http_403_response).await;
+        let _ = stream.flush().await;
+
+        return Err(anyhow::anyhow!("首字节鉴权失败"));
     }
 
-    debug!("✓ 协议前缀验证成功");
+    debug!("✓ 目标地址首字节鉴权成功");
 
     // 读取长度（2字节，大端序）
     let mut len_buffer = [0u8; 2];
@@ -189,45 +260,50 @@ async fn read_target_address(
     // 解密地址数据
     decryptor.decode(&mut encrypted, len)?;
 
+    // ✅ 启用popcount反向调整
+    use shared::reverse_popcount_adjust;
+    let seed = decryptor.seed();
+    let decrypted = reverse_popcount_adjust(encrypted, seed)?;
+
     // 解析目标地址
     // 格式：类型(1) + 地址 + 端口(2)
-    let addr_type = encrypted[0];
+    let addr_type = decrypted[0];
 
     match addr_type {
         0x01 => {
             // IPv4
-            if encrypted.len() < 7 {
+            if decrypted.len() < 7 {
                 return Err(anyhow::anyhow!("IPv4地址数据不完整"));
             }
-            let ip = std::net::Ipv4Addr::new(encrypted[1], encrypted[2], encrypted[3], encrypted[4]);
-            let port = u16::from_be_bytes([encrypted[5], encrypted[6]]);
+            let ip = std::net::Ipv4Addr::new(decrypted[1], decrypted[2], decrypted[3], decrypted[4]);
+            let port = u16::from_be_bytes([decrypted[5], decrypted[6]]);
             Ok(TargetAddr::Ipv4(ip, port))
         }
         0x03 => {
             // 域名
-            if encrypted.len() < 3 {
+            if decrypted.len() < 3 {
                 return Err(anyhow::anyhow!("域名地址数据不完整"));
             }
-            let domain_len = encrypted[1] as usize;
-            if encrypted.len() < 2 + domain_len + 2 {
+            let domain_len = decrypted[1] as usize;
+            if decrypted.len() < 2 + domain_len + 2 {
                 return Err(anyhow::anyhow!("域名地址数据不完整"));
             }
-            let domain = String::from_utf8_lossy(&encrypted[2..2 + domain_len]).to_string();
+            let domain = String::from_utf8_lossy(&decrypted[2..2 + domain_len]).to_string();
             let port = u16::from_be_bytes([
-                encrypted[2 + domain_len],
-                encrypted[2 + domain_len + 1],
+                decrypted[2 + domain_len],
+                decrypted[2 + domain_len + 1],
             ]);
             Ok(TargetAddr::Domain(domain, port))
         }
         0x04 => {
             // IPv6
-            if encrypted.len() < 19 {
+            if decrypted.len() < 19 {
                 return Err(anyhow::anyhow!("IPv6地址数据不完整"));
             }
             let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(&encrypted[1..17]);
+            ip_bytes.copy_from_slice(&decrypted[1..17]);
             let ip = std::net::Ipv6Addr::from(ip_bytes);
-            let port = u16::from_be_bytes([encrypted[17], encrypted[18]]);
+            let port = u16::from_be_bytes([decrypted[17], decrypted[18]]);
             Ok(TargetAddr::Ipv6(ip, port))
         }
         _ => Err(anyhow::anyhow!("不支持的地址类型: {}", addr_type)),
@@ -400,24 +476,51 @@ async fn verify_client_auth(
     decryptor: &mut KingObj,
     config: &ServerConfig,
 ) -> anyhow::Result<String> {
-    use shared::PROTOCOL_PREFIX;
+    use shared::{extract_auth_byte_from_prefix, verify_first_auth_byte};
 
     // 🔍 打印服务端使用的密钥（用于调试）
     debug!("🔑 服务端使用密钥: \"{}\"", config.auth.shared_secret);
 
-    // 读取并验证协议前缀
-    let mut prefix_buffer = [0u8; PROTOCOL_PREFIX.len()];
+    // 读取协议前缀（6字节，包含鉴权字节）
+    let mut prefix_buffer = [0u8; 6];
     stream.read_exact(&mut prefix_buffer).await?;
 
-    if prefix_buffer != *PROTOCOL_PREFIX {
-        return Err(anyhow::anyhow!(
-            "无效的协议前缀: {:?}, 期望: {:?}",
-            prefix_buffer,
-            PROTOCOL_PREFIX
-        ));
+    // 提取鉴权字节
+    let auth_byte = extract_auth_byte_from_prefix(&prefix_buffer)
+        .ok_or_else(|| anyhow::anyhow!("无效的协议前缀: {:?}", prefix_buffer))?;
+
+    debug!("📋 收到协议前缀: {:?}, 鉴权字节: {}", prefix_buffer, auth_byte);
+
+    // 从共享密钥中提取首字节用于鉴权
+    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+
+    // 验证首字节鉴权（仅基于时间和密钥）
+    let auth_valid = verify_first_auth_byte(
+        auth_byte,
+        shared_secret_byte,
+        config.auth.max_time_diff_secs,
+    );
+
+    if !auth_valid {
+        // 首字节鉴权失败，发送 HTTP 403 响应
+        warn!("⚠️  首字节鉴权失败: 接收={}", auth_byte);
+
+        let http_403_response = b"HTTP/1.1 403 Forbidden\r\n\
+                                   Content-Type: text/plain\r\n\
+                                   Content-Length: 9\r\n\
+                                   Connection: close\r\n\
+                                   \r\n\
+                                   Forbidden";
+        let _ = stream.write_all(http_403_response).await;
+        let _ = stream.flush().await;
+
+        return Err(anyhow::anyhow!("首字节鉴权失败"));
     }
 
-    debug!("✓ 协议前缀验证成功");
+    debug!("✓ 首字节鉴权成功");
 
     // 读取长度（2字节）
     let mut len_buffer = [0u8; 2];

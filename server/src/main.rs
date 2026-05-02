@@ -8,6 +8,7 @@
 
 mod config;
 mod server;
+mod defense;
 
 use anyhow::Result;
 use tracing::info;

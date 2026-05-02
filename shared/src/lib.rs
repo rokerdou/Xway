@@ -14,5 +14,14 @@ pub use auth::AuthPacket;
 pub use auth_config::AuthConfig;
 pub use crypto::KingObj;
 pub use error::{ProtocolError, Result};
-pub use popcount::{adjust_popcount, analyze_popcount, PROTOCOL_PREFIX, reverse_popcount_adjust};
+pub use popcount::{
+    adjust_popcount,
+    analyze_popcount,
+    generate_protocol_prefix,
+    extract_auth_byte_from_prefix,
+    generate_first_auth_byte,
+    verify_first_auth_byte,
+    PROTOCOL_PREFIX_TEMPLATE,
+    reverse_popcount_adjust,
+};
 pub use protocol::*;

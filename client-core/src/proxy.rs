@@ -1,7 +1,7 @@
 //! SOCKS5代理客户端核心逻辑
 
 use crate::{ClientConfig, ProxyStatus, Result, ConnectionGuard};
-use shared::{AuthPacket, KingObj};
+use shared::{AuthPacket, KingObj, generate_first_auth_byte};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error, debug};
 use std::sync::Arc;
@@ -305,7 +305,7 @@ async fn handle_local_connection(
     }
 
     // 发送目标地址
-    if let Err(e) = send_target_address(&mut remote_stream, &target_addr).await {
+    if let Err(e) = send_target_address(&mut remote_stream, &target_addr, &config).await {
         error!("发送目标地址失败: {}", e);
         return Err(e.into());
     }
@@ -430,20 +430,38 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 }
 
 /// 发送目标地址到远程服务端
-async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr) -> anyhow::Result<()> {
-    use shared::PROTOCOL_PREFIX;
+async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr, config: &ClientConfig) -> anyhow::Result<()> {
+    use shared::{generate_protocol_prefix, adjust_popcount, generate_first_auth_byte};
 
+    // 从共享密钥中提取首字节用于鉴权
+    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0); // 如果密钥为空,使用0
+
+    // 生成鉴权字节（仅基于时间和密钥）
+    let auth_byte = generate_first_auth_byte(shared_secret_byte);
+
+    // 生成带鉴权的协议前缀
+    let protocol_prefix = generate_protocol_prefix(auth_byte);
+
+    // 加密目标地址
     let addr_bytes = target_addr.encode();
     let mut king = KingObj::new();
     let mut encrypted = addr_bytes.clone();
     let encrypted_len = encrypted.len();
     king.encode(&mut encrypted, encrypted_len)?;
 
-    // 添加协议前缀（方案1：满足Ex2规则）
-    let len = encrypted.len() as u16;
-    stream.write_all(PROTOCOL_PREFIX).await?;
+    // ✅ 启用popcount调整
+    let seed = king.seed();
+    let target_range = (2.5, 5.2);
+    let (adjusted_data, _bits_added) = adjust_popcount(encrypted, seed, target_range)?;
+
+    // 添加协议前缀（满足Ex2规则：前6个可打印ASCII）
+    let len = adjusted_data.len() as u16;
+    stream.write_all(&protocol_prefix).await?;
     stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&encrypted).await?;
+    stream.write_all(&adjusted_data).await?;
 
     Ok(())
 }
@@ -604,14 +622,27 @@ async fn send_auth_packet(
     stream: &mut TcpStream,
     config: &ClientConfig,
 ) -> anyhow::Result<()> {
+    // 从共享密钥中提取首字节用于鉴权
+    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0); // 如果密钥为空,使用0
+
+    // 生成鉴权字节（仅基于时间和密钥）
+    let auth_byte = generate_first_auth_byte(shared_secret_byte);
+
+    debug!("首字节鉴权: 鉴权字节={}", auth_byte);
+
+    // 创建认证包
     let auth_packet = AuthPacket::new(
         config.auth.username.clone(),
         config.auth.shared_secret.as_bytes(),
         config.auth.sequence,
     );
 
+    // 序列化并加密（带鉴权字节）
     let mut encryptor = KingObj::new();
-    let encrypted = auth_packet.serialize_encrypted(&mut encryptor)?;
+    let encrypted = auth_packet.serialize_encrypted(&mut encryptor, Some(auth_byte))?;
 
     stream.write_all(&encrypted).await?;
     Ok(())

@@ -423,9 +423,19 @@ async fn send_auth_packet(
         config.auth.sequence,
     );
 
-    // 加密认证包
+    // 从共享密钥中提取首字节用于鉴权
+    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+
+    // 生成鉴权字节（仅基于时间和密钥）
+    use shared::generate_first_auth_byte;
+    let auth_byte = generate_first_auth_byte(shared_secret_byte);
+
+    // 加密认证包（带鉴权字节）
     let mut encryptor = KingObj::new();
-    let encrypted = auth_packet.serialize_encrypted(&mut encryptor)?;
+    let encrypted = auth_packet.serialize_encrypted(&mut encryptor, Some(auth_byte))?;
 
     // 发送加密的认证包
     stream.write_all(&encrypted).await?;
