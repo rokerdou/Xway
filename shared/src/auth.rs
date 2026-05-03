@@ -3,7 +3,7 @@
 //! 使用HMAC-SHA256实现客户端-服务端认证
 //! 认证包格式：长度(2) + username_len(1) + username + timestamp(8) + sequence(8) + hmac(32)
 
-use crate::{KingObj, ProtocolError, Result, adjust_popcount, reverse_popcount_adjust};
+use crate::{KingObj, ProtocolError, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -312,16 +312,10 @@ impl AuthPacket {
         // 先序列化
         let data = self.serialize();
 
-        // ✅ 修复顺序：先popcount调整，再加密
-        // 使用encryptor的seed作为popcount调整的seed
-        let seed = encryptor.seed();
-        // 目标范围：<3.4（添加0比特）或>4.6（添加1比特）
-        let target_range = (2.5, 5.2);
-        let (mut adjusted_data, _bits_added) = adjust_popcount(data, seed, target_range)?;
-
-        // 加密（注意：加密会修改adjusted_data）
-        let len = adjusted_data.len();
-        encryptor.encode(&mut adjusted_data, len)?;
+        // 加密数据
+        let len = data.len();
+        let mut encrypted_data = data.clone();
+        encryptor.encode(&mut encrypted_data, len)?;
 
         // 生成协议前缀（带鉴权字节或默认）
         let prefix = if let Some(byte) = auth_byte {
@@ -331,8 +325,8 @@ impl AuthPacket {
             crate::generate_protocol_prefix(0)
         };
 
-        // 构建最终数据：前缀(6) + 长度(2) + 加密后的popcount调整数据
-        let final_len = adjusted_data.len();
+        // 构建最终数据：前缀(6) + 长度(2) + 加密后的数据
+        let final_len = encrypted_data.len();
         let mut result = Vec::with_capacity(prefix.len() + 2 + final_len);
 
         // 添加协议前缀（满足Ex2: 前6个可打印ASCII）
@@ -341,8 +335,8 @@ impl AuthPacket {
         // 添加长度前缀（2字节，大端序）
         result.extend_from_slice(&(final_len as u16).to_be_bytes());
 
-        // 添加加密后的popcount调整数据
-        result.extend_from_slice(&adjusted_data);
+        // 添加加密后的数据
+        result.extend_from_slice(&encrypted_data);
 
         Ok(result)
     }
@@ -390,33 +384,15 @@ impl AuthPacket {
             return Err(ProtocolError::InvalidLength.into());
         }
 
-        // 读取加密数据（包含4字节popcount标签）
+        // 读取加密数据
         let encrypted = &data_without_prefix[2..2 + len];
 
-        // 分离popcount标签和加密数据
-        if encrypted.len() < 4 {
-            return Err(ProtocolError::InvalidLength.into());
-        }
-
-        let popcount_tag = &encrypted[..4];  // 前4字节是popcount标签
-        let encrypted_data = &encrypted[4..]; // 剩余的是加密数据
-
-        // 只解密数据部分（不包括popcount标签）
-        let mut decrypted = encrypted_data.to_vec();
-        decryptor.decode(&mut decrypted, encrypted_data.len())?;
-
-        // 重新组合：popcount标签 + 解密后的数据
-        let mut full_decrypted = Vec::with_capacity(4 + decrypted.len());
-        full_decrypted.extend_from_slice(popcount_tag);
-        full_decrypted.extend_from_slice(&decrypted);
-
-        // ✅ 启用popcount反向调整
-        // 使用decryptor的seed作为popcount反向调整的seed
-        let seed = decryptor.seed();
-        let original_data = reverse_popcount_adjust(full_decrypted, seed)?;
+        // 解密数据
+        let mut decrypted = encrypted.to_vec();
+        decryptor.decode(&mut decrypted, encrypted.len())?;
 
         // 反序列化
-        let packet = Self::deserialize(&original_data)?;
+        let packet = Self::deserialize(&decrypted)?;
 
         Ok((packet, auth_byte))
     }

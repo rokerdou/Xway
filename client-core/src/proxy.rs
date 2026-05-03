@@ -431,7 +431,7 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 
 /// 发送目标地址到远程服务端
 async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr, config: &ClientConfig) -> anyhow::Result<()> {
-    use shared::{generate_protocol_prefix, adjust_popcount, generate_first_auth_byte};
+    use shared::{generate_protocol_prefix, generate_first_auth_byte};
 
     // 从共享密钥中提取首字节用于鉴权
     let shared_secret_byte = config.auth.shared_secret.as_bytes()
@@ -445,22 +445,20 @@ async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::Targe
     // 生成带鉴权的协议前缀
     let protocol_prefix = generate_protocol_prefix(auth_byte);
 
-    // ✅ 修复顺序：先popcount调整，再加密
+    // 序列化目标地址
     let addr_bytes = target_addr.encode();
-    let mut king = KingObj::new();
-    let seed = king.seed();
-    let target_range = (2.5, 5.2);
-    let (mut adjusted_data, _bits_added) = adjust_popcount(addr_bytes, seed, target_range)?;
 
-    // 加密调整后的数据
-    let len = adjusted_data.len();
-    king.encode(&mut adjusted_data, len)?;
+    // 加密地址数据
+    let mut king = KingObj::new();
+    let len = addr_bytes.len();
+    let mut encrypted_data = addr_bytes.clone();
+    king.encode(&mut encrypted_data, len)?;
 
     // 添加协议前缀（满足Ex2规则：前6个可打印ASCII）
-    let final_len = adjusted_data.len() as u16;
+    let final_len = encrypted_data.len() as u16;
     stream.write_all(&protocol_prefix).await?;
     stream.write_all(&final_len.to_be_bytes()).await?;
-    stream.write_all(&adjusted_data).await?;
+    stream.write_all(&encrypted_data).await?;
 
     Ok(())
 }

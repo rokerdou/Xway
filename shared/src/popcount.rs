@@ -203,11 +203,19 @@ pub fn adjust_popcount(
     // 检查是否在GFW检测范围内
     let in_gfw_range = current_popcount >= GFW_POPCOUNT_MIN && current_popcount <= GFW_POPCOUNT_MAX;
 
-    // 如果已经在GFW检测范围外，立即返回
+    // ✅ 修复：即使不在GFW检测范围内，也要添加4字节前缀（bits_to_add=0）
+    // 这样服务端才能正确解析数据
     if !in_gfw_range {
-        eprintln!("⚠️  Popcount调整跳过: 当前popcount={:.2}不在GFW检测范围[{:.2}, {:.2}]内",
+        eprintln!("⚠️  当前popcount={:.2}不在GFW检测范围[{:.2}, {:.2}]内，添加零调整前缀",
                  current_popcount, GFW_POPCOUNT_MIN, GFW_POPCOUNT_MAX);
-        return Ok((data, 0));
+
+        // 添加4字节前缀（bits_to_add=0表示未调整）
+        let len_bytes = (0u32).to_be_bytes();  // bits_to_add = 0
+        let mut result = Vec::with_capacity(data.len() + 4);
+        result.extend_from_slice(&len_bytes);
+        result.extend(data);
+
+        return Ok((result, 0));
     }
 
     // 决定添加1比特还是0比特
@@ -302,12 +310,22 @@ pub fn reverse_popcount_adjust(
         data[0], data[1], data[2], data[3]
     ]) as usize;
 
+    eprintln!("🔍 Popcount反向调整: bits_to_add={}, 前4字节={:?}, 原始数据长度={}",
+             bits_to_add, &data[0..4.min(data.len())], data.len());
+
     // 检查bits_to_add是否合理（不应该大于总比特数的50%）
     let total_bits = data.len() * 8 - 32; // 减去前4字节（32比特）
-    if bits_to_add == 0 || bits_to_add > total_bits / 2 {
-        // 可能是未调整的数据，直接返回（不移除前4字节）
-        eprintln!("⚠️  Popcount反向调整: bits_to_add={}, 前4字节={:?}, 直接返回全长{}字节",
-                 bits_to_add, &data[0..4.min(data.len())], data.len());
+
+    // ✅ 修复：当bits_to_add=0时，移除4字节前缀
+    if bits_to_add == 0 {
+        eprintln!("⚠️  检测到未调整的数据（bits_to_add=0），移除4字节前缀");
+        data.drain(0..4);
+        return Ok(data);
+    }
+
+    if bits_to_add > total_bits / 2 {
+        // bits_to_add异常大，可能是误判，返回原数据
+        eprintln!("⚠️  bits_to_add异常大({})，返回原数据", bits_to_add);
         return Ok(data);
     }
 

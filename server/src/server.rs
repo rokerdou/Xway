@@ -266,50 +266,45 @@ async fn read_target_address(
     // 解密地址数据
     decryptor.decode(&mut encrypted, len)?;
 
-    // ✅ 启用popcount反向调整
-    use shared::reverse_popcount_adjust;
-    let seed = decryptor.seed();
-    let decrypted = reverse_popcount_adjust(encrypted, seed)?;
-
     // 解析目标地址
     // 格式：类型(1) + 地址 + 端口(2)
-    let addr_type = decrypted[0];
+    let addr_type = encrypted[0];
 
     match addr_type {
         0x01 => {
             // IPv4
-            if decrypted.len() < 7 {
+            if encrypted.len() < 7 {
                 return Err(anyhow::anyhow!("IPv4地址数据不完整"));
             }
-            let ip = std::net::Ipv4Addr::new(decrypted[1], decrypted[2], decrypted[3], decrypted[4]);
-            let port = u16::from_be_bytes([decrypted[5], decrypted[6]]);
+            let ip = std::net::Ipv4Addr::new(encrypted[1], encrypted[2], encrypted[3], encrypted[4]);
+            let port = u16::from_be_bytes([encrypted[5], encrypted[6]]);
             Ok(TargetAddr::Ipv4(ip, port))
         }
         0x03 => {
             // 域名
-            if decrypted.len() < 3 {
+            if encrypted.len() < 3 {
                 return Err(anyhow::anyhow!("域名地址数据不完整"));
             }
-            let domain_len = decrypted[1] as usize;
-            if decrypted.len() < 2 + domain_len + 2 {
+            let domain_len = encrypted[1] as usize;
+            if encrypted.len() < 2 + domain_len + 2 {
                 return Err(anyhow::anyhow!("域名地址数据不完整"));
             }
-            let domain = String::from_utf8_lossy(&decrypted[2..2 + domain_len]).to_string();
+            let domain = String::from_utf8_lossy(&encrypted[2..2 + domain_len]).to_string();
             let port = u16::from_be_bytes([
-                decrypted[2 + domain_len],
-                decrypted[2 + domain_len + 1],
+                encrypted[2 + domain_len],
+                encrypted[2 + domain_len + 1],
             ]);
             Ok(TargetAddr::Domain(domain, port))
         }
         0x04 => {
             // IPv6
-            if decrypted.len() < 19 {
+            if encrypted.len() < 19 {
                 return Err(anyhow::anyhow!("IPv6地址数据不完整"));
             }
             let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(&decrypted[1..17]);
+            ip_bytes.copy_from_slice(&encrypted[1..17]);
             let ip = std::net::Ipv6Addr::from(ip_bytes);
-            let port = u16::from_be_bytes([decrypted[17], decrypted[18]]);
+            let port = u16::from_be_bytes([encrypted[17], encrypted[18]]);
             Ok(TargetAddr::Ipv6(ip, port))
         }
         _ => Err(anyhow::anyhow!("不支持的地址类型: {}", addr_type)),
@@ -542,17 +537,10 @@ async fn verify_client_auth(
     // 解密认证包
     decryptor.decode(&mut encrypted, len)?;
 
-    debug!("🔓 解密成功，开始popcount反向调整...");
-
-    // ✅ 启用popcount反向调整
-    use shared::reverse_popcount_adjust;
-    let seed = decryptor.seed();
-    let decrypted = reverse_popcount_adjust(encrypted, seed)?;
-
-    debug!("🔓 Popcount反向调整成功，开始反序列化...");
+    debug!("🔓 解密成功，开始反序列化...");
 
     // 反序列化并验证
-    let auth_packet = AuthPacket::deserialize(&decrypted)?;
+    let auth_packet = AuthPacket::deserialize(&encrypted)?;
 
     debug!("👤 反序列化成功，用户名: {}", auth_packet.username);
 
