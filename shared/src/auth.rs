@@ -310,18 +310,18 @@ impl AuthPacket {
     #[inline(always)]
     pub fn serialize_encrypted(&self, encryptor: &mut KingObj, auth_byte: Option<u8>) -> Result<Vec<u8>> {
         // 先序列化
-        let mut data = self.serialize();
+        let data = self.serialize();
 
-        // 加密
-        let len = data.len();
-        encryptor.encode(&mut data, len)?;
-
-        // ✅ 启用popcount调整（方案3）
+        // ✅ 修复顺序：先popcount调整，再加密
         // 使用encryptor的seed作为popcount调整的seed
         let seed = encryptor.seed();
         // 目标范围：<3.4（添加0比特）或>4.6（添加1比特）
         let target_range = (2.5, 5.2);
-        let (adjusted_data, _bits_added) = adjust_popcount(data, seed, target_range)?;
+        let (mut adjusted_data, _bits_added) = adjust_popcount(data, seed, target_range)?;
+
+        // 加密（注意：加密会修改adjusted_data）
+        let len = adjusted_data.len();
+        encryptor.encode(&mut adjusted_data, len)?;
 
         // 生成协议前缀（带鉴权字节或默认）
         let prefix = if let Some(byte) = auth_byte {
@@ -331,7 +331,7 @@ impl AuthPacket {
             crate::generate_protocol_prefix(0)
         };
 
-        // 构建最终数据：前缀(6) + 长度(2) + popcount调整后的数据
+        // 构建最终数据：前缀(6) + 长度(2) + 加密后的popcount调整数据
         let final_len = adjusted_data.len();
         let mut result = Vec::with_capacity(prefix.len() + 2 + final_len);
 
@@ -341,7 +341,7 @@ impl AuthPacket {
         // 添加长度前缀（2字节，大端序）
         result.extend_from_slice(&(final_len as u16).to_be_bytes());
 
-        // 添加popcount调整后的数据
+        // 添加加密后的popcount调整数据
         result.extend_from_slice(&adjusted_data);
 
         Ok(result)

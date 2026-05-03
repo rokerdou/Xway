@@ -445,22 +445,21 @@ async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::Targe
     // 生成带鉴权的协议前缀
     let protocol_prefix = generate_protocol_prefix(auth_byte);
 
-    // 加密目标地址
+    // ✅ 修复顺序：先popcount调整，再加密
     let addr_bytes = target_addr.encode();
     let mut king = KingObj::new();
-    let mut encrypted = addr_bytes.clone();
-    let encrypted_len = encrypted.len();
-    king.encode(&mut encrypted, encrypted_len)?;
-
-    // ✅ 启用popcount调整
     let seed = king.seed();
     let target_range = (2.5, 5.2);
-    let (adjusted_data, _bits_added) = adjust_popcount(encrypted, seed, target_range)?;
+    let (mut adjusted_data, _bits_added) = adjust_popcount(addr_bytes, seed, target_range)?;
+
+    // 加密调整后的数据
+    let len = adjusted_data.len();
+    king.encode(&mut adjusted_data, len)?;
 
     // 添加协议前缀（满足Ex2规则：前6个可打印ASCII）
-    let len = adjusted_data.len() as u16;
+    let final_len = adjusted_data.len() as u16;
     stream.write_all(&protocol_prefix).await?;
-    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&final_len.to_be_bytes()).await?;
     stream.write_all(&adjusted_data).await?;
 
     Ok(())

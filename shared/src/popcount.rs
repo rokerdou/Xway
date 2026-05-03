@@ -197,11 +197,16 @@ pub fn adjust_popcount(
 ) -> Result<(Vec<u8>, usize)> {
     let current_popcount = calculate_avg_popcount(&data);
 
+    eprintln!("🔍 Popcount调整调用: 数据长度={}, 当前popcount={:.2}",
+             data.len(), current_popcount);
+
     // 检查是否在GFW检测范围内
     let in_gfw_range = current_popcount >= GFW_POPCOUNT_MIN && current_popcount <= GFW_POPCOUNT_MAX;
 
     // 如果已经在GFW检测范围外，立即返回
     if !in_gfw_range {
+        eprintln!("⚠️  Popcount调整跳过: 当前popcount={:.2}不在GFW检测范围[{:.2}, {:.2}]内",
+                 current_popcount, GFW_POPCOUNT_MIN, GFW_POPCOUNT_MAX);
         return Ok((data, 0));
     }
 
@@ -297,10 +302,12 @@ pub fn reverse_popcount_adjust(
         data[0], data[1], data[2], data[3]
     ]) as usize;
 
-    // 快速检查：无效的bits_to_add值
-    if bits_to_add == 0 {
-        // 未调整的数据，去掉4字节标签
-        data.drain(0..4);
+    // 检查bits_to_add是否合理（不应该大于总比特数的50%）
+    let total_bits = data.len() * 8 - 32; // 减去前4字节（32比特）
+    if bits_to_add == 0 || bits_to_add > total_bits / 2 {
+        // 可能是未调整的数据，直接返回（不移除前4字节）
+        eprintln!("⚠️  Popcount反向调整: bits_to_add={}, 前4字节={:?}, 直接返回全长{}字节",
+                 bits_to_add, &data[0..4.min(data.len())], data.len());
         return Ok(data);
     }
 

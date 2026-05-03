@@ -530,7 +530,7 @@ pub fn run() {
         .setup(|app| {
             // 初始化日志
             tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::INFO)
+                .with_max_level(tracing::Level::DEBUG)  // 临时启用DEBUG级别来调试数据传输问题
                 .init();
 
             // 加载配置

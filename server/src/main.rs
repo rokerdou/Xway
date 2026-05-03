@@ -18,7 +18,7 @@ use tracing_subscriber;
 async fn main() -> Result<()> {
     // 初始化日志
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)  // 启用DEBUG级别来调试认证问题
         .init();
 
     info!("🚀 SOCKS5代理服务端启动中...");
