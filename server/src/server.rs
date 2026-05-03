@@ -536,10 +536,17 @@ async fn verify_client_auth(
     // 解密认证包
     decryptor.decode(&mut encrypted, len)?;
 
-    debug!("🔓 解密成功，开始反序列化...");
+    debug!("🔓 解密成功，开始popcount反向调整...");
+
+    // ✅ 启用popcount反向调整
+    use shared::reverse_popcount_adjust;
+    let seed = decryptor.seed();
+    let decrypted = reverse_popcount_adjust(encrypted, seed)?;
+
+    debug!("🔓 Popcount反向调整成功，开始反序列化...");
 
     // 反序列化并验证
-    let auth_packet = AuthPacket::deserialize(&encrypted)?;
+    let auth_packet = AuthPacket::deserialize(&decrypted)?;
 
     debug!("👤 反序列化成功，用户名: {}", auth_packet.username);
 
