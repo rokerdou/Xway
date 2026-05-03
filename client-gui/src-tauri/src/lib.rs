@@ -68,6 +68,47 @@ async fn stop_proxy(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取本地代理端口配置
+#[tauri::command]
+async fn get_local_proxy_port(state: State<'_, AppState>) -> Result<u16, String> {
+    let config = state.config.lock().await;
+    Ok(config.local.listen_port)
+}
+
+/// 更新本地代理端口配置
+#[tauri::command]
+async fn update_local_proxy_port(
+    state: State<'_, AppState>,
+    port: u16,
+) -> Result<(), String> {
+    let mut config = state.config.lock().await;
+
+    // 检查端口范围
+    if port < 1024 || port > 65535 {
+        return Err("端口必须在1024-65535之间".to_string());
+    }
+
+    // 如果代理正在运行，检查端口是否被占用
+    let port_in_use = check_port_listening(port).await;
+    if port_in_use {
+        return Err(format!("端口{}已被占用", port));
+    }
+
+    config.local.listen_port = port;
+
+    // 保存配置
+    let config_path = ClientConfig::default_config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+    }
+    config.save_to_file(&config_path)
+        .map_err(|e| format!("保存配置失败: {}", e))?;
+
+    tracing::info!("✅ 本地代理端口已更新为: {}", port);
+    Ok(())
+}
+
 /// 获取代理状态
 #[tauri::command]
 async fn get_proxy_status(state: State<'_, AppState>) -> Result<String, String> {
@@ -530,6 +571,8 @@ pub fn run() {
             get_servers_config,
             update_servers_config,
             check_local_port,
+            get_local_proxy_port,
+            update_local_proxy_port,
             set_system_proxy,
             get_proxy_env_vars,
             check_system_proxy_status,

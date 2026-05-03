@@ -106,17 +106,21 @@ async fn handle_client_connection(
 ) -> anyhow::Result<()> {
     debug!("🔌 开始处理客户端连接: {}", client_addr);
 
-    // 🛡️ 步骤0: DPI防御检查
+    // 🛡️ 步骤0: DPI防御检查（仅在启用IP封禁时执行）
     let client_ip = client_addr.ip();
-    if defense.is_banned(client_ip).await {
-        warn!("⚠️  拒绝被封禁IP的连接: {}", client_addr);
-        return Err(anyhow::anyhow!("IP已被封禁"));
-    }
+    if config.server.enable_ip_ban {
+        if defense.is_banned(client_ip).await {
+            warn!("⚠️  拒绝被封禁IP的连接: {}", client_addr);
+            return Err(anyhow::anyhow!("IP已被封禁"));
+        }
 
-    // 记录连接尝试
-    if let Err(e) = defense.record_connection(client_ip).await {
-        warn!("⚠️  连接被拒绝: {} - {}", client_addr, e);
-        return Err(anyhow::anyhow!(e));
+        // 记录连接尝试
+        if let Err(e) = defense.record_connection(client_ip).await {
+            warn!("⚠️  连接被拒绝: {} - {}", client_addr, e);
+            return Err(anyhow::anyhow!(e));
+        }
+    } else {
+        debug!("🔓 IP封禁功能已禁用（配置: enable_ip_ban=false）");
     }
 
     // 步骤1: 验证客户端认证（如果启用）
@@ -130,8 +134,10 @@ async fn handle_client_connection(
             }
             Err(e) => {
                 error!("❌ 客户端认证失败 [{}]: {}", client_addr, e);
-                // 记录鉴权失败
-                defense.record_auth_failure(client_ip).await;
+                // 记录鉴权失败（仅在启用IP封禁时）
+                if config.server.enable_ip_ban {
+                    defense.record_auth_failure(client_ip).await;
+                }
                 return Err(e);
             }
         }

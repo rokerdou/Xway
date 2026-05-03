@@ -31,6 +31,9 @@ pub struct ServerSettings {
     /// 超时时间（秒）
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// 是否启用IP封禁（Docker部署时应禁用，因为看到的是内网IP）
+    #[serde(default = "default_enable_ip_ban")]
+    pub enable_ip_ban: bool,
 }
 
 /// 日志设置
@@ -61,6 +64,7 @@ pub struct RelaySettings {
 // 默认值函数
 fn default_max_connections() -> usize { 1000 }
 fn default_timeout() -> u64 { 80 }  // 读写超时 80 秒
+fn default_enable_ip_ban() -> bool { false }  // 默认禁用IP封禁（Docker友好）
 fn default_log_level() -> String { "info".to_string() }
 fn default_log_dir() -> String { "./logs".to_string() }
 fn default_max_log_files() -> usize { 7 }
@@ -95,6 +99,7 @@ impl ServerConfig {
                 listen_port: 1080,
                 max_connections: default_max_connections(),
                 timeout_seconds: default_timeout(),
+                enable_ip_ban: default_enable_ip_ban(),
             },
             logging: LoggingSettings {
                 level: default_log_level(),

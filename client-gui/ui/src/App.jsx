@@ -19,6 +19,8 @@ function App() {
   const [proxyEnvVars, setProxyEnvVars] = useState('');
   const [showAddServer, setShowAddServer] = useState(false);
   const [newServer, setNewServer] = useState({ host: '', port: 1080 });
+  const [localProxyPort, setLocalProxyPort] = useState(1081);
+  const [editingPort, setEditingPort] = useState(false);
 
   const appWindow = getCurrentWindow();
 
@@ -46,9 +48,7 @@ function App() {
 
   const handleToggleSystemProxy = async () => {
     try {
-      // 使用本地SOCKS5代理监听端口1081，而不是远程服务器端口
-      const localProxyPort = 1081;
-
+      // 使用配置的本地代理端口
       const result = await invoke('set_system_proxy', { enabled: !systemProxyEnabled, port: localProxyPort });
 
       if (result.startsWith('✅')) {
@@ -78,9 +78,7 @@ function App() {
     try {
       console.log('🎯 开始复制环境变量...');
 
-      // 使用本地SOCKS5代理监听端口1081
-      const localProxyPort = 1081;
-
+      // 使用配置的本地代理端口
       console.log('📡 调用 get_proxy_env_vars, port:', localProxyPort);
       const envVars = await invoke('get_proxy_env_vars', { port: localProxyPort });
       console.log('✅ 获取到环境变量:', envVars);
@@ -107,6 +105,7 @@ function App() {
   useEffect(() => {
     loadConfig();
     loadStatus();
+    loadLocalProxyPort();
 
     // 定期刷新状态和统计
     const interval = setInterval(() => {
@@ -157,6 +156,15 @@ function App() {
       setStats(data);
     } catch (e) {
       console.error('获取统计失败:', e);
+    }
+  };
+
+  const loadLocalProxyPort = async () => {
+    try {
+      const port = await invoke('get_local_proxy_port');
+      setLocalProxyPort(port);
+    } catch (e) {
+      console.error('加载本地代理端口失败:', e);
     }
   };
 
@@ -293,6 +301,19 @@ function App() {
     }
   };
 
+  const handleUpdateLocalProxyPort = async () => {
+    try {
+      if (editingPort) {
+        await invoke('update_local_proxy_port', { port: localProxyPort });
+        alert(`✅ 本地代理端口已更新为 ${localProxyPort}`);
+        setEditingPort(false);
+      }
+    } catch (e) {
+      console.error('更新本地代理端口失败:', e);
+      alert('❌ 更新失败: ' + e);
+    }
+  };
+
   return (
     <div className="h-full w-full bg-gray-900 text-white">
       {/* 顶部标题栏 - 可拖拽窗口 */}
@@ -375,6 +396,66 @@ function App() {
             ...
           </div>
         )} */}
+
+        {/* 本地代理端口配置 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-gray-300">本地代理端口</h2>
+            <button
+              onClick={() => {
+                if (editingPort) {
+                  handleUpdateLocalProxyPort();
+                } else {
+                  setEditingPort(true);
+                }
+              }}
+              className={`text-[10px] px-2 py-0.5 rounded ${
+                editingPort
+                  ? 'bg-green-600 hover:bg-green-700'
+                  : 'bg-blue-600 hover:bg-blue-700'
+              }`}
+            >
+              {editingPort ? '保存' : '修改'}
+            </button>
+          </div>
+
+          {editingPort ? (
+            <div className="bg-gray-700/50 rounded-lg p-2 flex gap-1.5">
+              <input
+                type="number"
+                min="1024"
+                max="65535"
+                value={localProxyPort}
+                onChange={(e) => setLocalProxyPort(Number(e.target.value))}
+                className="flex-1 bg-gray-600 border border-gray-500 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={() => {
+                  setEditingPort(false);
+                  loadLocalProxyPort(); // 恢复原值
+                }}
+                className="px-2 py-1 bg-gray-600 hover:bg-gray-700 rounded-md text-xs"
+              >
+                取消
+              </button>
+            </div>
+          ) : (
+            <div className="bg-gray-700/50 rounded-lg p-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-green-500" />
+                  <span className="text-xs font-medium">127.0.0.1:{localProxyPort}</span>
+                </div>
+                <span className="text-[9px] text-gray-400">
+                  {isRunning ? '监听中' : '未启动'}
+                </span>
+              </div>
+            </div>
+          )}
+          <p className="text-[9px] text-gray-400">
+            ⚠️ 修改端口需要重启代理
+          </p>
+        </div>
 
         {/* 服务器配置 */}
         <div className="space-y-2">

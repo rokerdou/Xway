@@ -390,17 +390,30 @@ impl AuthPacket {
             return Err(ProtocolError::InvalidLength.into());
         }
 
-        // 读取加密数据
+        // 读取加密数据（包含4字节popcount标签）
         let encrypted = &data_without_prefix[2..2 + len];
 
-        // 解密
-        let mut decrypted = encrypted.to_vec();
-        decryptor.decode(&mut decrypted, len)?;
+        // 分离popcount标签和加密数据
+        if encrypted.len() < 4 {
+            return Err(ProtocolError::InvalidLength.into());
+        }
+
+        let popcount_tag = &encrypted[..4];  // 前4字节是popcount标签
+        let encrypted_data = &encrypted[4..]; // 剩余的是加密数据
+
+        // 只解密数据部分（不包括popcount标签）
+        let mut decrypted = encrypted_data.to_vec();
+        decryptor.decode(&mut decrypted, encrypted_data.len())?;
+
+        // 重新组合：popcount标签 + 解密后的数据
+        let mut full_decrypted = Vec::with_capacity(4 + decrypted.len());
+        full_decrypted.extend_from_slice(popcount_tag);
+        full_decrypted.extend_from_slice(&decrypted);
 
         // ✅ 启用popcount反向调整
         // 使用decryptor的seed作为popcount反向调整的seed
         let seed = decryptor.seed();
-        let original_data = reverse_popcount_adjust(decrypted, seed)?;
+        let original_data = reverse_popcount_adjust(full_decrypted, seed)?;
 
         // 反序列化
         let packet = Self::deserialize(&original_data)?;
