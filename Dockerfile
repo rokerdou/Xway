@@ -1,53 +1,19 @@
-# 多阶段构建 - SOCKS5 代理服务端
-# 用于 dokploy 部署：从 git 拉取代码后直接构建
-# 支持 Rust workspace 包含多个成员
+# 单阶段构建 - 使用预编译二进制
+# 用于 dokploy 部署：直接从 git 拉取预编译的 Linux 二进制文件
+# 优势：
+#  1. 容器构建速度极快（无需编译）
+#  2. 最终镜像更小（无构建工具）
+#  3. 节省服务器资源
 
 # ============================================
-# 阶段1: 构建阶段
-# ============================================
-FROM rust:latest AS builder
-
-WORKDIR /build
-
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制 workspace 配置
-COPY Cargo.toml ./
-
-# 复制所有 workspace 成员的 manifest
-# 包括新增的 client-core 和 client-gui/src-tauri
-COPY server/Cargo.toml server/
-COPY shared/Cargo.toml shared/
-COPY client/Cargo.toml client/
-COPY client-core/Cargo.toml client-core/
-COPY client-gui/src-tauri/Cargo.toml client-gui/src-tauri/
-
-# 创建 dummy src（所有 workspace 成员）
-# 为所有成员创建空源文件，使 cargo fetch 能够解析依赖
-RUN mkdir -p server/src shared/src client/src \
-         client-core/src client-gui/src-tauri/src \
-    && echo "fn main() {}" > server/src/main.rs \
-    && echo "pub mod lib; pub use lib::KingObj;" > shared/src/lib.rs \
-    && echo "fn main() {}" > client/src/main.rs \
-    && echo "" > client-core/src/lib.rs \
-    && echo "" > client-gui/src-tauri/src/lib.rs
-
-# 缓存依赖
-RUN cargo fetch
-
-# 覆盖真实源码（只复制 server 需要的）
-COPY server/src server/src
-COPY shared/src shared/src
-
-# 编译 server（只编译需要的，不编译 client 和 client-gui）
-RUN cargo build --release -p server
-
-# ============================================
-# 阶段2: 运行阶段
+# 运行阶段（唯一阶段）
 # ============================================
 FROM debian:bookworm-slim
+
+# 元数据
+LABEL maintainer="your-email@example.com"
+LABEL description="SOCKS5 代理服务端 - 预编译版本"
+LABEL version="1.0"
 
 # 安装运行时依赖
 RUN apt-get update && apt-get install -y \
@@ -61,11 +27,12 @@ RUN id -u proxy >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash proxy
 # 创建应用目录
 WORKDIR /app
 
-# 从构建阶段复制二进制文件
-COPY --from=builder /build/target/release/server /app/server
+# 从发布仓库复制预编译的二进制文件
+# 这个二进制文件由 scripts/build-release.sh 生成并复制到发布仓库
+COPY server /app/server
 
-# 复制服务端配置文件（直接从本地复制）
-COPY server/config/server.toml /app/server.toml
+# 复制服务端配置文件
+COPY server.toml /app/server.toml
 
 # 更改所有权
 RUN chown -R proxy:proxy /app

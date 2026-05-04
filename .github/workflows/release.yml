@@ -1,0 +1,217 @@
+name: Build and Release Server Binary
+
+# 触发条件
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'server/**'
+      - 'shared/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-release:
+    name: Build Server Binary
+    runs-on: ubuntu-latest
+
+    # 设置权限
+    permissions:
+      contents: read
+
+    steps:
+      # ============================================
+      # 步骤 1: 检出源码
+      # ============================================
+      - name: 📥 Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史，用于版本信息
+
+      # ============================================
+      # 步骤 2: 安装 Rust 工具链
+      # ============================================
+      - name: 🦀 Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # ============================================
+      # 步骤 3: 缓存依赖
+      # ============================================
+      - name: 💾 Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: 💾 Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: 💾 Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-target-
+
+      # ============================================
+      # 步骤 4: 编译 server
+      # ============================================
+      - name: 🔨 Build server binary
+        run: |
+          echo "开始编译 server..."
+          cargo build --release -p server
+          echo "✓ 编译完成"
+
+          # 显示二进制信息
+          ls -lh target/release/server
+          file target/release/server
+
+          # 测试运行（显示版本）
+          ./target/release/server --version || true
+
+      # ============================================
+      # 步骤 5: 运行测试（可选）
+      # ============================================
+      - name: 🧪 Run tests
+        run: |
+          echo "运行测试..."
+          cargo test --workspace --release
+          echo "✓ 测试通过"
+
+      # ============================================
+      # 步骤 6: 克隆发布仓库
+      # ============================================
+      - name: 📥 Clone releases repository
+        run: |
+          echo "克隆发布仓库..."
+
+          # 使用 GitHub Token 认证
+          git clone \
+            https://${{ secrets.RELEASES_TOKEN }}@github.com/${{ github.repository_owner }}/socks5-proxy-releases.git \
+            releases-repo
+
+          echo "✓ 发布仓库已克隆"
+
+      # ============================================
+      # 步骤 7: 复制二进制和配置
+      # ============================================
+      - name: 📦 Copy binary and configs
+        run: |
+          echo "复制文件到发布仓库..."
+
+          # 复制二进制
+          cp target/release/server releases-repo/
+
+          # 复制 Dockerfile（如果发布仓库没有）
+          if [ ! -f releases-repo/Dockerfile ]; then
+            cp Dockerfile releases-repo/
+            echo "✓ 已复制 Dockerfile"
+          fi
+
+          # 复制配置文件（如果发布仓库没有）
+          if [ ! -f releases-repo/server.toml ]; then
+            cp server/config/server.toml releases-repo/server.toml
+            echo "✓ 已复制配置文件"
+          fi
+
+          # 创建 README（如果不存在）
+          if [ ! -f releases-repo/README.md ]; then
+            cat > releases-repo/README.md << 'EOF'
+          # SOCKS5 代理服务端 - 二进制发布仓库
+
+          此仓库由 GitHub Actions 自动维护，包含预编译的服务端二进制文件。
+
+          ## 文件说明
+          - `server`: Linux 预编译二进制文件（由 CI 自动构建）
+          - `Dockerfile`: 单阶段部署配置
+          - `server.toml`: 服务端配置文件
+
+          ## 更新方式
+          修改源码仓库的 `server/` 或 `shared/` 目录后，GitHub Actions 会自动：
+          1. 编译 Linux 二进制
+          2. 推送到此仓库
+          3. dokploy 自动拉取并部署
+
+          ## 手动触发
+          访问源码仓库的 Actions 页面，选择 "Build and Release Server Binary" 工作流，点击 "Run workflow"。
+          EOF
+            echo "✓ 已创建 README"
+          fi
+
+          # 显示文件大小
+          FILE_SIZE=$(ls -lh releases-repo/server | awk '{print $5}')
+          echo "二进制大小: ${FILE_SIZE}"
+
+      # ============================================
+      # 步骤 8: 提交并推送
+      # ============================================
+      - name: 🚀 Commit and push to releases repo
+        run: |
+          cd releases-repo
+
+          # 配置 Git
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # 检查是否有变更
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "ℹ️ 没有检测到变更，无需提交"
+            exit 0
+          fi
+
+          # 显示变更
+          echo "检测到以下变更:"
+          git status --short
+
+          # 获取提交信息
+          COMMIT_MSG="chore: 自动构建 - $(date '+%Y-%m-%d %H:%M:%S')
+
+          来源仓库: ${{ github.repository }}
+          来源分支: ${{ github.ref_name }}
+          提交 SHA: ${{ github.sha }}
+          构建日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # 提交变更
+          git add .
+          git commit -m "$COMMIT_MSG"
+
+          # 推送
+          git push origin main
+
+          echo "✓ 已推送到发布仓库"
+
+      # ============================================
+      # 步骤 9: 生成构建摘要
+      # ============================================
+      - name: 📊 Build summary
+        if: always()
+        run: |
+          echo "## 🎉 构建完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **源码仓库**: \`${{ github.repository }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **分支**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **提交**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **发布仓库**: \`${{ github.repository_owner }}/socks5-proxy-releases\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 二进制信息" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -lh target/release/server >> $GITHUB_STEP_SUMMARY
+          file target/release/server >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

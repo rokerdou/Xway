@@ -40,23 +40,54 @@ socks5-proxy-rust/
 
 ## 🚀 快速开始
 
-### 方式 1: 使用 dokploy 部署（推荐）
+### 方式 1: 使用 GitHub Actions + dokploy 部署（推荐）⚡
+
+**自动化部署流程**：推送代码 → 自动编译 → 自动部署
+
+```bash
+# 1. 配置 GitHub Actions（一次性，5分钟）
+# 查看: GITHUB_ACTIONS_SETUP.md
+# - 创建发布仓库
+# - 配置 Personal Access Token
+# - 添加 GitHub Secret
+
+# 2. 推送代码
+git push origin main
+
+# ✅ GitHub Actions 自动编译并推送到发布仓库
+# ✅ dokploy 自动拉取并部署
+```
+
+详见：[GITHUB_ACTIONS_SETUP.md](./GITHUB_ACTIONS_SETUP.md) | [检查清单](./GITHUB_ACTIONS_CHECKLIST.md)
+
+---
+
+### 方式 2: 本地构建 + dokploy 部署
+
+**适合**：macOS 开发者，快速部署
+
+```bash
+# 1. 本地构建（Docker 编译）
+./scripts/build-in-docker.sh
+
+# 2. 推送到发布仓库
+cd ../socks5-proxy-releases
+git add . && git commit -m "chore: 更新服务端" && git push
+
+# 3. dokploy 自动部署
+```
+
+详见：[BINARY_RELEASE_GUIDE.md](./BINARY_RELEASE_GUIDE.md)
+
+---
+
+### 方式 3: dokploy 容器内构建（传统方式）
 
 详见 [DOKPLOY_DEPLOY.md](./DOKPLOY_DEPLOY.md)
 
-```bash
-# 1. 推送代码到 GitHub
-git push origin main
+---
 
-# 2. 在 dokploy 中配置应用
-# Git 仓库: https://github.com/rokerdou/Xway.git
-# 端口: 1080
-
-# 3. 配置客户端
-# 修改 client/config/client.toml 中的 server_address
-```
-
-### 方式 2: 本地运行
+### 方式 4: 本地运行
 
 ```bash
 # 1. 编译
@@ -74,11 +105,23 @@ curl -x socks5://127.0.0.1:1081 http://www.baidu.com
 
 ## 📖 文档
 
+### 部署相关
+
 | 文档 | 说明 |
 |------|------|
+| [GITHUB_ACTIONS_SETUP.md](./GITHUB_ACTIONS_SETUP.md) | 🔥 GitHub Actions 自动构建配置指南 |
+| [GITHUB_ACTIONS_CHECKLIST.md](./GITHUB_ACTIONS_CHECKLIST.md) | ⚡ 快速配置检查清单 |
+| [QUICKSTART_BINARY_RELEASE.md](./QUICKSTART_BINARY_RELEASE.md) | 📦 本地构建快速开始 |
+| [BINARY_RELEASE_GUIDE.md](./BINARY_RELEASE_GUIDE.md) | 📘 完整的二进制发布指南 |
+| [CROSS_COMPILE_ISSUES.md](./CROSS_COMPILE_ISSUES.md) | 🔧 交叉编译问题解决 |
 | [QUICK_START.md](./QUICK_START.md) | 3 分钟快速部署指南 |
 | [DOKPLOY_DEPLOY.md](./DOKPLOY_DEPLOY.md) | dokploy 详细部署文档 |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | 通用部署指南 |
+
+### 技术文档
+
+| 文档 | 说明 |
+|------|------|
 | [TESTING_GUIDE.md](./TESTING_GUIDE.md) | 测试和代理配置指南 |
 | [CRYPTO_TEST_REPORT.md](./CRYPTO_TEST_REPORT.md) | 加密算法测试报告 |
 | [E2E_TEST_REPORT.md](./E2E_TEST_REPORT.md) | 端到端测试报告 |
