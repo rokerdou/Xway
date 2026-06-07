@@ -1,9 +1,9 @@
 //! 代理状态管理
 
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use std::sync::Arc;
 use crate::TrafficStats;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// 代理状态
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,11 +78,12 @@ impl ProxyStatus {
     /// 减少连接数
     pub fn decrement_connections(&self) {
         // 使用 saturating_sub 防止下溢
-        self.stats.connections.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |x| Some(x.saturating_sub(1))
-        ).ok();
+        self.stats
+            .connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+                Some(x.saturating_sub(1))
+            })
+            .ok();
     }
 
     /// 重置统计信息

@@ -2,9 +2,9 @@
 //!
 //! 实现RFC 1928定义的SOCKS5协议
 
+use crate::error::{ProtocolError, Result};
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use crate::error::{ProtocolError, Result};
 
 /// SOCKS5协议版本
 pub const SOCKS5_VERSION: u8 = 0x05;
@@ -440,8 +440,9 @@ impl Response {
         let mut reply = [0u8; 1];
         reader.read_exact(&mut reply)?;
 
-        let rep = Reply::from_u8(reply[0])
-            .ok_or_else(|| ProtocolError::GeneralFailure(format!("Invalid reply code: {}", reply[0])))?;
+        let rep = Reply::from_u8(reply[0]).ok_or_else(|| {
+            ProtocolError::GeneralFailure(format!("Invalid reply code: {}", reply[0]))
+        })?;
 
         // 跳过RSV字段
         let mut rsv = [0u8; 1];

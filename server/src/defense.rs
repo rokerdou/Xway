@@ -125,6 +125,7 @@ impl DefenseManager {
     }
 
     /// 使用默认配置创建防御管理器
+    #[cfg(test)]
     pub fn with_default_config() -> Self {
         Self::new(DefenseConfig::default())
     }
@@ -210,7 +211,9 @@ impl DefenseManager {
         let mut bans = self.bans.write().await;
 
         // 计算封禁持续时间（指数增长）
-        let duration = self.config.initial_ban_duration
+        let duration = self
+            .config
+            .initial_ban_duration
             .saturating_mul(self.config.ban_multiplier.pow(level - 1))
             .min(self.config.max_ban_duration);
 
@@ -232,32 +235,6 @@ impl DefenseManager {
         // 清理过期的封禁记录
         bans.retain(|_, ban| !ban.is_expired());
     }
-
-    /// 获取统计信息（用于监控）
-    pub async fn get_stats(&self) -> DefenseStats {
-        let stats = self.stats.read().await;
-        let bans = self.bans.read().await;
-
-        DefenseStats {
-            total_tracked_ips: stats.len(),
-            total_banned_ips: bans.len(),
-            rate_limit_window: self.config.rate_limit_window,
-            max_connections_per_window: self.config.max_connections_per_window,
-        }
-    }
-}
-
-/// 防御统计信息
-#[derive(Debug, Clone)]
-pub struct DefenseStats {
-    /// 正在追踪的IP数量
-    pub total_tracked_ips: usize,
-    /// 当前被封禁的IP数量
-    pub total_banned_ips: usize,
-    /// 速率限制窗口大小
-    pub rate_limit_window: Duration,
-    /// 每个窗口的最大连接数
-    pub max_connections_per_window: u32,
 }
 
 #[cfg(test)]

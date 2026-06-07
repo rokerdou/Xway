@@ -1,9 +1,9 @@
 //! 服务端配置管理
 
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use shared::AuthConfig;
+use std::path::Path;
 
 /// 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,33 +62,39 @@ pub struct RelaySettings {
 }
 
 // 默认值函数
-fn default_max_connections() -> usize { 1000 }
-fn default_timeout() -> u64 { 80 }  // 读写超时 80 秒
-fn default_enable_ip_ban() -> bool { false }  // 默认禁用IP封禁（Docker友好）
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_dir() -> String { "./logs".to_string() }
-fn default_max_log_files() -> usize { 7 }
-fn default_buffer_size() -> usize { 8192 }
-fn default_traffic_stats() -> bool { true }
+fn default_max_connections() -> usize {
+    1000
+}
+fn default_timeout() -> u64 {
+    80
+} // 读写超时 80 秒
+fn default_enable_ip_ban() -> bool {
+    false
+} // 默认禁用IP封禁（Docker友好）
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_dir() -> String {
+    "./logs".to_string()
+}
+fn default_max_log_files() -> usize {
+    7
+}
+fn default_buffer_size() -> usize {
+    8192
+}
+fn default_traffic_stats() -> bool {
+    true
+}
 
 impl ServerConfig {
     /// 从文件加载配置
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("无法读取配置文件: {}", e))?;
-        let config: ServerConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
+        let config: ServerConfig =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
         Ok(config)
-    }
-
-    /// 保存配置到文件
-    ///
-    /// 注意：此方法预留用于将来可能需要的配置保存功能（如运行时备份配置）
-    #[allow(dead_code)]
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
     }
 
     /// 创建默认配置

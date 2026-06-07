@@ -7,18 +7,17 @@
 //! 4. 将目标服务器的流量加密后返回给客户端
 
 mod config;
-mod server;
 mod defense;
+mod server;
 
 use anyhow::Result;
 use tracing::info;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化日志
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)  // 启用DEBUG级别来调试认证问题
+        .with_max_level(tracing::Level::DEBUG) // 启用DEBUG级别来调试认证问题
         .init();
 
     info!("🚀 SOCKS5代理服务端启动中...");
@@ -40,17 +39,20 @@ async fn main() -> Result<()> {
             cfg
         }
         Err(e) => {
-            info!("⚠️  无法加载配置文件 ({}), 使用默认配置: {}", config_path, e);
+            info!(
+                "⚠️  无法加载配置文件 ({}), 使用默认配置: {}",
+                config_path, e
+            );
             config::ServerConfig::default_config()
         }
     };
 
-    // 🔍 打印认证配置（用于调试）
-    info!("🔐 认证配置: enabled={}, shared_secret=\"{}\"",
-          config.auth.enabled,
-          config.auth.shared_secret);
+    info!("🔐 认证配置: enabled={}", config.auth.enabled);
 
-    info!("🎯 监听地址: {}:{}", config.server.listen_addr, config.server.listen_port);
+    info!(
+        "🎯 监听地址: {}:{}",
+        config.server.listen_addr, config.server.listen_port
+    );
 
     // 创建服务端
     let server = server::ProxyServer::new(config)?;

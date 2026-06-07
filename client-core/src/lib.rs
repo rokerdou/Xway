@@ -3,13 +3,13 @@
 //! 提供跨平台的代理功能，可作为CLI或GUI的后端
 
 pub mod config;
+pub mod platform;
 pub mod proxy;
 pub mod state;
-pub mod platform;
 
 pub use config::{ClientConfig, ServerConfig};
 pub use proxy::ProxyClient;
-pub use state::{ProxyState, ProxyStatus, ConnectionGuard};
+pub use state::{ConnectionGuard, ProxyState, ProxyStatus};
 
 /// 代理客户端错误类型
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

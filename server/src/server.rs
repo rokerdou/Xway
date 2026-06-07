@@ -7,15 +7,21 @@
 //! - 双向加密转发
 
 use crate::config::ServerConfig;
-use crate::defense::{DefenseManager, DefenseConfig};
-use shared::{AuthPacket, KingObj, Result, TargetAddr};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, error, debug, warn};
+use crate::defense::{DefenseConfig, DefenseManager};
+use shared::{
+    decode_obfuscated_frame, generate_first_auth_byte, AuthPacket, FrameCodec, Result, TargetAddr,
+    DEFAULT_MAX_PADDING, MAX_FRAME_BODY_LEN,
+};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
+use tracing::{debug, error, info, warn};
 
 /// SOCKS5代理服务端
 pub struct ProxyServer {
@@ -27,9 +33,12 @@ pub struct ProxyServer {
     defense: Arc<DefenseManager>,
 }
 
+static AUTH_REPLAY_CACHE: OnceLock<Mutex<HashMap<[u8; 32], u64>>> = OnceLock::new();
+
 impl ProxyServer {
     /// 创建新的代理服务端
     pub fn new(config: ServerConfig) -> Result<Self> {
+        config.auth.validate()?;
         let semaphore = Arc::new(Semaphore::new(config.server.max_connections));
 
         // 创建DPI防御管理器
@@ -63,13 +72,12 @@ impl ProxyServer {
 
     /// 启动服务端
     pub async fn run(&self) -> Result<()> {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        let bind_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-            self.config.server.listen_port
+        let bind_addr = format!(
+            "{}:{}",
+            self.config.server.listen_addr, self.config.server.listen_port
         );
         let listener = TcpListener::bind(bind_addr).await?;
+        let bind_addr = listener.local_addr()?;
 
         info!("🎯 SOCKS5代理服务端监听: {}", bind_addr);
         info!("📊 最大连接数: {}", self.config.server.max_connections);
@@ -89,7 +97,9 @@ impl ProxyServer {
             tokio::spawn(async move {
                 let _permit = permit; // 持有许可直到连接结束
 
-                if let Err(e) = handle_client_connection(client_stream, client_addr, config, defense).await {
+                if let Err(e) =
+                    handle_client_connection(client_stream, client_addr, config, defense).await
+                {
                     error!("❌ 连接处理错误 [{}]: {}", client_addr, e);
                 }
             });
@@ -126,9 +136,7 @@ async fn handle_client_connection(
     // 步骤1: 验证客户端认证（如果启用）
     if config.auth.enabled {
         debug!("🔐 开始验证客户端认证 [{}]", client_addr);
-        // 为认证创建独立的解密器
-        let mut auth_decryptor = KingObj::new();
-        match verify_client_auth(&mut client_stream, &mut auth_decryptor, &config).await {
+        match verify_client_auth(&mut client_stream, &config).await {
             Ok(username) => {
                 debug!("✅ 客户端认证成功: {} [{}]", username, client_addr);
             }
@@ -144,13 +152,11 @@ async fn handle_client_connection(
     }
 
     // 步骤2: 读取目标地址（加密的）
-    // 为目标地址创建新的解密器（每次连接使用独立的解密器）
-    let mut addr_decryptor = KingObj::new();
-    let target_addr = match read_target_address(&mut client_stream, &mut addr_decryptor, &config).await {
+    let target_addr = match read_target_address(&mut client_stream, &config).await {
         Ok(addr) => addr,
         Err(e) => {
             error!("❌ 读取目标地址失败 [{}]: {}", client_addr, e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -161,7 +167,7 @@ async fn handle_client_connection(
         Ok(s) => s,
         Err(e) => {
             error!("❌ 无法连接到目标服务器 {:?}: {}", target_addr, e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -188,7 +194,7 @@ fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
     {
         use socket2::TcpKeepalive;
         let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))    // 60 秒后开始探测
+            .with_time(Duration::from_secs(60)) // 60 秒后开始探测
             .with_interval(Duration::from_secs(10)); // 每 10 秒探测一次
 
         socket.set_tcp_keepalive(&keepalive)?;
@@ -206,109 +212,11 @@ fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
 /// 读取目标地址（加密的）
 async fn read_target_address(
     stream: &mut TcpStream,
-    decryptor: &mut KingObj,
     config: &ServerConfig,
 ) -> anyhow::Result<TargetAddr> {
-    use shared::{extract_auth_byte_from_prefix, verify_first_auth_byte};
-
-    // 读取协议前缀（6字节，包含鉴权字节）
-    let mut prefix_buffer = [0u8; 6];
-    stream.read_exact(&mut prefix_buffer).await?;
-
-    // 提取鉴权字节
-    let auth_byte = extract_auth_byte_from_prefix(&prefix_buffer)
-        .ok_or_else(|| anyhow::anyhow!("无效的协议前缀: {:?}", prefix_buffer))?;
-
-    debug!("📋 收到目标地址前缀: {:?}, 鉴权字节: {}", prefix_buffer, auth_byte);
-
-    // 从共享密钥中提取首字节用于鉴权
-    let shared_secret_byte = config.auth.shared_secret.as_bytes()
-        .first()
-        .copied()
-        .unwrap_or(0);
-
-    // 验证首字节鉴权（仅基于时间和密钥）
-    let auth_valid = verify_first_auth_byte(
-        auth_byte,
-        shared_secret_byte,
-        config.auth.max_time_diff_secs,
-    );
-
-    if !auth_valid {
-        // 首字节鉴权失败，发送 HTTP 403 响应
-        warn!("⚠️  目标地址首字节鉴权失败: 接收={}", auth_byte);
-
-        let http_403_response = b"HTTP/1.1 403 Forbidden\r\n\
-                                   Content-Type: text/plain\r\n\
-                                   Content-Length: 9\r\n\
-                                   Connection: close\r\n\
-                                   \r\n\
-                                   Forbidden";
-        let _ = stream.write_all(http_403_response).await;
-        let _ = stream.flush().await;
-
-        return Err(anyhow::anyhow!("首字节鉴权失败"));
-    }
-
-    debug!("✓ 目标地址首字节鉴权成功");
-
-    // 读取长度（2字节，大端序）
-    let mut len_buffer = [0u8; 2];
-    stream.read_exact(&mut len_buffer).await?;
-    let len = u16::from_be_bytes(len_buffer) as usize;
-
-    // 读取加密的地址数据
-    let mut encrypted = vec![0u8; len];
-    stream.read_exact(&mut encrypted).await?;
-
-    debug!("读取到 {} 字节的加密目标地址", len);
-
-    // 解密地址数据
-    decryptor.decode(&mut encrypted, len)?;
-
-    // 解析目标地址
-    // 格式：类型(1) + 地址 + 端口(2)
-    let addr_type = encrypted[0];
-
-    match addr_type {
-        0x01 => {
-            // IPv4
-            if encrypted.len() < 7 {
-                return Err(anyhow::anyhow!("IPv4地址数据不完整"));
-            }
-            let ip = std::net::Ipv4Addr::new(encrypted[1], encrypted[2], encrypted[3], encrypted[4]);
-            let port = u16::from_be_bytes([encrypted[5], encrypted[6]]);
-            Ok(TargetAddr::Ipv4(ip, port))
-        }
-        0x03 => {
-            // 域名
-            if encrypted.len() < 3 {
-                return Err(anyhow::anyhow!("域名地址数据不完整"));
-            }
-            let domain_len = encrypted[1] as usize;
-            if encrypted.len() < 2 + domain_len + 2 {
-                return Err(anyhow::anyhow!("域名地址数据不完整"));
-            }
-            let domain = String::from_utf8_lossy(&encrypted[2..2 + domain_len]).to_string();
-            let port = u16::from_be_bytes([
-                encrypted[2 + domain_len],
-                encrypted[2 + domain_len + 1],
-            ]);
-            Ok(TargetAddr::Domain(domain, port))
-        }
-        0x04 => {
-            // IPv6
-            if encrypted.len() < 19 {
-                return Err(anyhow::anyhow!("IPv6地址数据不完整"));
-            }
-            let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(&encrypted[1..17]);
-            let ip = std::net::Ipv6Addr::from(ip_bytes);
-            let port = u16::from_be_bytes([encrypted[17], encrypted[18]]);
-            Ok(TargetAddr::Ipv6(ip, port))
-        }
-        _ => Err(anyhow::anyhow!("不支持的地址类型: {}", addr_type)),
-    }
+    let payload = read_obfuscated_payload(stream, config).await?;
+    let mut reader = payload.as_slice();
+    Ok(TargetAddr::decode(&mut reader)?)
 }
 
 /// 连接到目标服务器
@@ -339,54 +247,40 @@ async fn relay_with_encryption(
         debug!("设置目标 Keep-Alive 失败: {}", e);
     }
 
-    let mut client_decryptor = KingObj::new();
-    let mut client_encryptor = KingObj::new();
-
     let (mut client_reader, mut client_writer) = client_stream.split();
     let (mut target_reader, mut target_writer) = target_stream.split();
 
     let buffer_size = config.relay.max_buffer_size;
     let read_timeout = Duration::from_secs(config.server.timeout_seconds);
+    let max_payload_size = buffer_size.min(16 * 1024);
+    let inbound_codec = FrameCodec::new(
+        config.auth.shared_secret.as_bytes(),
+        config.auth.max_time_diff_secs,
+    )?;
+    let outbound_codec = FrameCodec::new(
+        config.auth.shared_secret.as_bytes(),
+        config.auth.max_time_diff_secs,
+    )?;
 
     debug!("✓ 读写超时设置为: {} 秒", config.server.timeout_seconds);
 
     // 客户端 -> 目标（解密）
     let c2t = async move {
-        let mut len_buffer = [0u8; 2];
-        // 优化：在循环外预分配缓冲区，重用内存减少分配次数
-        let mut buffer = Vec::with_capacity(buffer_size);
-
         loop {
-            // 【修复】添加超时：读取加密数据长度
-            let result = timeout(read_timeout, client_reader.read_exact(&mut len_buffer)).await;
-            match result {
-                Ok(Ok(_)) => {}
+            let buffer = match timeout(
+                read_timeout,
+                read_obfuscated_payload_with_codec(&mut client_reader, &inbound_codec),
+            )
+            .await
+            {
+                Ok(Ok(payload)) => payload,
                 _ => {
-                    debug!("客户端->目标: 读取长度超时或错误，断开连接");
+                    debug!("客户端->目标: 读取加密帧超时或错误，断开连接");
                     break;
                 }
-            }
+            };
 
-            let len = u16::from_be_bytes(len_buffer) as usize;
-
-            // 优化：重用缓冲区，resize在capacity足够时不会重新分配
-            buffer.clear();
-            buffer.resize(len, 0);
-
-            // 【修复】添加超时：读取加密数据
-            let result = timeout(read_timeout, client_reader.read_exact(&mut buffer)).await;
-            match result {
-                Ok(Ok(_)) => {}
-                _ => {
-                    debug!("客户端->目标: 读取数据超时或错误，断开连接");
-                    break;
-                }
-            }
-
-            debug!("客户端->目标: {} 字节（加密）", len);
-
-            // 解密数据
-            client_decryptor.decode(&mut buffer, len)?;
+            debug!("客户端->目标: {} 字节", buffer.len());
 
             // 【修复】添加超时：发送到目标服务器
             let result = timeout(read_timeout, target_writer.write_all(&buffer)).await;
@@ -404,7 +298,7 @@ async fn relay_with_encryption(
 
     // 目标 -> 客户端（加密）
     let t2c = async move {
-        let mut buffer = vec![0u8; buffer_size];
+        let mut buffer = vec![0u8; max_payload_size];
 
         loop {
             // 【修复】添加超时：读取目标服务器数据
@@ -424,22 +318,16 @@ async fn relay_with_encryption(
 
             debug!("目标->客户端: {} 字节", n);
 
-            // 加密数据
-            client_encryptor.encode(&mut buffer, n)?;
-
-            // 【修复】添加超时：发送长度前缀到客户端
-            let len = n as u16;
-            let result = timeout(read_timeout, client_writer.write_all(&len.to_be_bytes())).await;
-            match result {
-                Ok(Ok(_)) => {}
-                _ => {
-                    debug!("目标->客户端: 发送长度超时或错误，断开连接");
-                    break;
-                }
-            }
-
-            // 【修复】添加超时：发送数据到客户端
-            let result = timeout(read_timeout, client_writer.write_all(&buffer[..n])).await;
+            let result = timeout(
+                read_timeout,
+                write_obfuscated_payload_with_codec(
+                    &mut client_writer,
+                    &buffer[..n],
+                    config,
+                    &outbound_codec,
+                ),
+            )
+            .await;
             match result {
                 Ok(Ok(_)) => {}
                 _ => {
@@ -474,73 +362,12 @@ async fn relay_with_encryption(
 /// 读取并验证加密的认证包
 async fn verify_client_auth(
     stream: &mut TcpStream,
-    decryptor: &mut KingObj,
     config: &ServerConfig,
 ) -> anyhow::Result<String> {
-    use shared::{extract_auth_byte_from_prefix, verify_first_auth_byte};
-
-    // 🔍 打印服务端使用的密钥（用于调试）
-    debug!("🔑 服务端使用密钥: \"{}\"", config.auth.shared_secret);
-
-    // 读取协议前缀（6字节，包含鉴权字节）
-    let mut prefix_buffer = [0u8; 6];
-    stream.read_exact(&mut prefix_buffer).await?;
-
-    // 提取鉴权字节
-    let auth_byte = extract_auth_byte_from_prefix(&prefix_buffer)
-        .ok_or_else(|| anyhow::anyhow!("无效的协议前缀: {:?}", prefix_buffer))?;
-
-    debug!("📋 收到协议前缀: {:?}, 鉴权字节: {}", prefix_buffer, auth_byte);
-
-    // 从共享密钥中提取首字节用于鉴权
-    let shared_secret_byte = config.auth.shared_secret.as_bytes()
-        .first()
-        .copied()
-        .unwrap_or(0);
-
-    // 验证首字节鉴权（仅基于时间和密钥）
-    let auth_valid = verify_first_auth_byte(
-        auth_byte,
-        shared_secret_byte,
-        config.auth.max_time_diff_secs,
-    );
-
-    if !auth_valid {
-        // 首字节鉴权失败，发送 HTTP 403 响应
-        warn!("⚠️  首字节鉴权失败: 接收={}", auth_byte);
-
-        let http_403_response = b"HTTP/1.1 403 Forbidden\r\n\
-                                   Content-Type: text/plain\r\n\
-                                   Content-Length: 9\r\n\
-                                   Connection: close\r\n\
-                                   \r\n\
-                                   Forbidden";
-        let _ = stream.write_all(http_403_response).await;
-        let _ = stream.flush().await;
-
-        return Err(anyhow::anyhow!("首字节鉴权失败"));
-    }
-
-    debug!("✓ 首字节鉴权成功");
-
-    // 读取长度（2字节）
-    let mut len_buffer = [0u8; 2];
-    stream.read_exact(&mut len_buffer).await?;
-    let len = u16::from_be_bytes(len_buffer) as usize;
-
-    // 读取加密的认证包
-    let mut encrypted = vec![0u8; len];
-    stream.read_exact(&mut encrypted).await?;
-
-    debug!("📦 收到认证包: {} 字节（加密后）", len);
-
-    // 解密认证包
-    decryptor.decode(&mut encrypted, len)?;
-
-    debug!("🔓 解密成功，开始反序列化...");
+    let payload = read_obfuscated_payload(stream, config).await?;
 
     // 反序列化并验证
-    let auth_packet = AuthPacket::deserialize(&encrypted)?;
+    let auth_packet = AuthPacket::deserialize(&payload)?;
 
     debug!("👤 反序列化成功，用户名: {}", auth_packet.username);
 
@@ -549,8 +376,112 @@ async fn verify_client_auth(
         config.auth.shared_secret.as_bytes(),
         config.auth.max_time_diff_secs,
     )?;
+    reject_replayed_auth(&auth_packet, config.auth.max_time_diff_secs).await?;
 
     debug!("✅ 认证包验证成功");
 
     Ok(auth_packet.username)
+}
+
+async fn reject_replayed_auth(
+    auth_packet: &AuthPacket,
+    max_time_diff_secs: u64,
+) -> anyhow::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(auth_packet.timestamp);
+    let min_timestamp = now.saturating_sub(max_time_diff_secs);
+    let cache = AUTH_REPLAY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().await;
+
+    cache.retain(|_, timestamp| *timestamp >= min_timestamp);
+    if cache.contains_key(&auth_packet.hmac) {
+        return Err(anyhow::anyhow!("认证包重放"));
+    }
+    cache.insert(auth_packet.hmac, auth_packet.timestamp);
+    Ok(())
+}
+
+fn current_auth_byte(config: &ServerConfig) -> u8 {
+    let shared_secret_byte = config
+        .auth
+        .shared_secret
+        .as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+    generate_first_auth_byte(shared_secret_byte)
+}
+
+async fn write_obfuscated_payload_with_codec<W>(
+    writer: &mut W,
+    payload: &[u8],
+    config: &ServerConfig,
+    codec: &FrameCodec,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = codec.encode(payload, current_auth_byte(config), DEFAULT_MAX_PADDING)?;
+    writer.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn read_obfuscated_payload<R>(
+    reader: &mut R,
+    config: &ServerConfig,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0u8; 6];
+    reader.read_exact(&mut prefix).await?;
+
+    let mut len_buffer = [0u8; 2];
+    reader.read_exact(&mut len_buffer).await?;
+    let body_len = u16::from_be_bytes(len_buffer) as usize;
+    if body_len > MAX_FRAME_BODY_LEN {
+        return Err(anyhow::anyhow!("加密帧长度超出限制"));
+    }
+
+    let mut frame = Vec::with_capacity(8 + body_len);
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(&len_buffer);
+    frame.resize(8 + body_len, 0);
+    reader.read_exact(&mut frame[8..]).await?;
+
+    let (payload, _) = decode_obfuscated_frame(
+        &frame,
+        config.auth.shared_secret.as_bytes(),
+        config.auth.max_time_diff_secs,
+    )?;
+    Ok(payload)
+}
+
+async fn read_obfuscated_payload_with_codec<R>(
+    reader: &mut R,
+    codec: &FrameCodec,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0u8; 6];
+    reader.read_exact(&mut prefix).await?;
+
+    let mut len_buffer = [0u8; 2];
+    reader.read_exact(&mut len_buffer).await?;
+    let body_len = u16::from_be_bytes(len_buffer) as usize;
+    if body_len > MAX_FRAME_BODY_LEN {
+        return Err(anyhow::anyhow!("加密帧长度超出限制"));
+    }
+
+    let mut frame = Vec::with_capacity(8 + body_len);
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(&len_buffer);
+    frame.resize(8 + body_len, 0);
+    reader.read_exact(&mut frame[8..]).await?;
+
+    let (payload, _) = codec.decode(&frame)?;
+    Ok(payload)
 }

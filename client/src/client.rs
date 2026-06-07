@@ -8,13 +8,17 @@
 //! 5. 将解密后的数据返回给本地SOCKS5客户端
 
 use crate::config::ClientConfig;
-use shared::{AuthPacket, KingObj, Result};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, error, debug};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use shared::{
+    encode_obfuscated_frame, generate_first_auth_byte, AuthPacket, FrameCodec, Result,
+    DEFAULT_MAX_PADDING, MAX_FRAME_BODY_LEN,
+};
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
+use tracing::{debug, error, info};
 
 /// SOCKS5代理客户端
 pub struct ProxyClient {
@@ -27,6 +31,7 @@ pub struct ProxyClient {
 impl ProxyClient {
     /// 创建新的代理客户端
     pub fn new(config: ClientConfig) -> Result<Self> {
+        config.auth.validate()?;
         let semaphore = Arc::new(Semaphore::new(100)); // 默认最多100个连接
 
         Ok(Self {
@@ -37,16 +42,18 @@ impl ProxyClient {
 
     /// 启动客户端
     pub async fn run(&self) -> Result<()> {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        let bind_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            self.config.local.listen_port
+        let bind_addr = format!(
+            "{}:{}",
+            self.config.local.listen_addr, self.config.local.listen_port
         );
-        let listener = TcpListener::bind(bind_addr).await?;
+        let listener = TcpListener::bind(&bind_addr).await?;
+        let bind_addr = listener.local_addr()?;
 
         info!("🎯 SOCKS5代理客户端监听: {}", bind_addr);
-        info!("📡 远程服务端: {}:{}", self.config.server.remote_server, self.config.server.remote_port);
+        info!(
+            "📡 远程服务端: {}:{}",
+            self.config.server.remote_server, self.config.server.remote_port
+        );
 
         loop {
             // 接受本地连接
@@ -81,7 +88,7 @@ async fn handle_local_connection(
     // 步骤1: SOCKS5握手
     if let Err(e) = handle_socks5_handshake(&mut local_stream).await {
         error!("❌ SOCKS5握手失败 [{}]: {}", local_addr, e);
-        return Err(e.into());
+        return Err(e);
     }
 
     debug!("✅ SOCKS5握手成功 [{}]", local_addr);
@@ -91,7 +98,7 @@ async fn handle_local_connection(
         Ok(addr) => addr,
         Err(e) => {
             error!("❌ 读取SOCKS5请求失败 [{}]: {}", local_addr, e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -103,7 +110,7 @@ async fn handle_local_connection(
         Ok(s) => s,
         Err(e) => {
             error!("❌ 无法连接到远程服务端: {}", e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -114,26 +121,26 @@ async fn handle_local_connection(
         debug!("🔐 发送认证包到远程服务端");
         if let Err(e) = send_auth_packet(&mut remote_stream, &config).await {
             error!("❌ 发送认证包失败: {}", e);
-            return Err(e.into());
+            return Err(e);
         }
         info!("✅ 认证包发送成功");
     }
 
     // 步骤5: 将目标地址加密发送给服务端
-    if let Err(e) = send_target_address(&mut remote_stream, &target_addr).await {
+    if let Err(e) = send_target_address(&mut remote_stream, &target_addr, &config).await {
         error!("❌ 发送目标地址失败: {}", e);
-        return Err(e.into());
+        return Err(e);
     }
 
     // 步骤6: 发送成功响应给本地客户端
     if let Err(e) = send_socks5_success_response(&mut local_stream).await {
         error!("❌ 发送SOCKS5响应失败: {}", e);
-        return Err(e.into());
+        return Err(e);
     }
 
     // 步骤7: 开始数据转发（本地 <-> 远程，带加密）
     info!("🔄 开始数据转发 [{}]", local_addr);
-    relay_with_encryption(local_stream, remote_stream).await?;
+    relay_with_encryption(local_stream, remote_stream, config).await?;
 
     Ok(())
 }
@@ -188,7 +195,8 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
     // 根据地址类型读取剩余数据
     let addr_type = header[3];
 
-    debug!("📋 SOCKS5请求地址类型: 0x{:02X} ({})",
+    debug!(
+        "📋 SOCKS5请求地址类型: 0x{:02X} ({})",
         addr_type,
         match addr_type {
             0x01 => "IPv4",
@@ -266,29 +274,17 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 }
 
 /// 发送目标地址到远程服务端
-async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr) -> anyhow::Result<()> {
+async fn send_target_address(
+    stream: &mut TcpStream,
+    target_addr: &shared::TargetAddr,
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
     debug!("📤 发送目标地址到远程服务端: {:?}", target_addr);
 
     // 将目标地址序列化
     let addr_bytes = target_addr.encode();
 
-    // 创建加密器
-    let mut king = KingObj::new();
-
-    // 加密地址数据
-    let mut encrypted = addr_bytes.clone();
-    let encrypted_len = encrypted.len();
-    king.encode(&mut encrypted, encrypted_len)?;
-
-    debug!("🔒 目标地址加密后: {} 字节", encrypted_len);
-
-    // 发送长度前缀（2字节，大端序）
-    let len = encrypted.len() as u16;
-    stream.write_all(&len.to_be_bytes()).await?;
-
-    // 发送加密后的地址
-    stream.write_all(&encrypted).await?;
-
+    write_obfuscated_payload(stream, &addr_bytes, config).await?;
     debug!("✅ 目标地址发送成功");
 
     Ok(())
@@ -300,7 +296,7 @@ async fn send_socks5_success_response(stream: &mut TcpStream) -> anyhow::Result<
     let response = [
         0x05, 0x00, 0x00, 0x01, // 版本、成功、保留、IPv4
         0x00, 0x00, 0x00, 0x00, // 绑定地址
-        0x00, 0x00,              // 绑定端口
+        0x00, 0x00, // 绑定端口
     ];
 
     stream.write_all(&response).await?;
@@ -315,12 +311,20 @@ async fn send_socks5_success_response(stream: &mut TcpStream) -> anyhow::Result<
 async fn relay_with_encryption(
     local_stream: TcpStream,
     remote_stream: TcpStream,
+    config: Arc<ClientConfig>,
 ) -> anyhow::Result<()> {
-    let mut local_encryptor = KingObj::new();
-    let mut local_decryptor = KingObj::new();
-
     let (mut local_reader, mut local_writer) = local_stream.into_split();
     let (mut remote_reader, mut remote_writer) = remote_stream.into_split();
+    let upload_config = config.clone();
+    let download_config = config;
+    let upload_codec = FrameCodec::new(
+        upload_config.auth.shared_secret.as_bytes(),
+        upload_config.auth.max_time_diff_secs,
+    )?;
+    let download_codec = FrameCodec::new(
+        download_config.auth.shared_secret.as_bytes(),
+        download_config.auth.max_time_diff_secs,
+    )?;
 
     // 本地 -> 远程（加密）
     let l2r = async move {
@@ -341,13 +345,13 @@ async fn relay_with_encryption(
             data.resize(n, 0);
             data.copy_from_slice(&buffer[..n]);
 
-            // 加密数据
-            local_encryptor.encode(&mut data, n)?;
-
-            // 发送到远程（需要添加长度前缀）
-            let len = data.len() as u16;
-            remote_writer.write_all(&len.to_be_bytes()).await?;
-            remote_writer.write_all(&data).await?;
+            write_obfuscated_payload_with_codec(
+                &mut remote_writer,
+                &data,
+                &upload_config,
+                &upload_codec,
+            )
+            .await?;
         }
 
         Ok::<(), anyhow::Error>(())
@@ -355,32 +359,19 @@ async fn relay_with_encryption(
 
     // 远程 -> 本地（解密）
     let r2l = async move {
-        let mut len_buffer = [0u8; 2];
-        // 优化：预分配缓冲区，重用内存减少分配次数
-        let mut buffer = Vec::with_capacity(8192);
-
         loop {
-            // 读取数据长度
-            match remote_reader.read_exact(&mut len_buffer).await {
-                Ok(_) => {}
+            let buffer = match read_obfuscated_payload_with_codec(
+                &mut remote_reader,
+                &download_config,
+                &download_codec,
+            )
+            .await
+            {
+                Ok(payload) => payload,
                 Err(_) => break,
-            }
-            let len = u16::from_be_bytes(len_buffer) as usize;
+            };
 
-            // 优化：重用缓冲区，resize在capacity足够时不会重新分配
-            buffer.clear();
-            buffer.resize(len, 0);
-
-            // 读取加密数据
-            match remote_reader.read_exact(&mut buffer).await {
-                Ok(_) => {}
-                Err(_) => break,
-            }
-
-            debug!("远程->本地: {} 字节（加密）", len);
-
-            // 解密数据
-            local_decryptor.decode(&mut buffer, len)?;
+            debug!("远程->本地: {} 字节", buffer.len());
 
             // 发送到本地
             match local_writer.write_all(&buffer).await {
@@ -412,33 +403,95 @@ async fn relay_with_encryption(
 /// 发送认证包到远程服务端
 ///
 /// 创建、加密并发送认证包
-async fn send_auth_packet(
-    stream: &mut TcpStream,
-    config: &ClientConfig,
-) -> anyhow::Result<()> {
+async fn send_auth_packet(stream: &mut TcpStream, config: &ClientConfig) -> anyhow::Result<()> {
     // 创建认证包
     let auth_packet = AuthPacket::new(
         config.auth.username.clone(),
         config.auth.shared_secret.as_bytes(),
-        config.auth.sequence,
+        next_auth_sequence(),
     );
 
-    // 从共享密钥中提取首字节用于鉴权
-    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+    let payload = auth_packet.serialize();
+    write_obfuscated_payload(stream, &payload, config).await?;
+
+    Ok(())
+}
+
+fn current_auth_byte(config: &ClientConfig) -> u8 {
+    let shared_secret_byte = config
+        .auth
+        .shared_secret
+        .as_bytes()
         .first()
         .copied()
         .unwrap_or(0);
+    generate_first_auth_byte(shared_secret_byte)
+}
 
-    // 生成鉴权字节（仅基于时间和密钥）
-    use shared::generate_first_auth_byte;
-    let auth_byte = generate_first_auth_byte(shared_secret_byte);
+fn next_auth_sequence() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (nanos & u128::from(u64::MAX)) as u64
+}
 
-    // 加密认证包（带鉴权字节）
-    let mut encryptor = KingObj::new();
-    let encrypted = auth_packet.serialize_encrypted(&mut encryptor, Some(auth_byte))?;
-
-    // 发送加密的认证包
-    stream.write_all(&encrypted).await?;
-
+async fn write_obfuscated_payload<W>(
+    writer: &mut W,
+    payload: &[u8],
+    config: &ClientConfig,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = encode_obfuscated_frame(
+        payload,
+        config.auth.shared_secret.as_bytes(),
+        current_auth_byte(config),
+        DEFAULT_MAX_PADDING,
+    )?;
+    writer.write_all(&frame).await?;
     Ok(())
+}
+
+async fn write_obfuscated_payload_with_codec<W>(
+    writer: &mut W,
+    payload: &[u8],
+    config: &ClientConfig,
+    codec: &FrameCodec,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = codec.encode(payload, current_auth_byte(config), DEFAULT_MAX_PADDING)?;
+    writer.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn read_obfuscated_payload_with_codec<R>(
+    reader: &mut R,
+    _config: &ClientConfig,
+    codec: &FrameCodec,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0u8; 6];
+    reader.read_exact(&mut prefix).await?;
+
+    let mut len_buffer = [0u8; 2];
+    reader.read_exact(&mut len_buffer).await?;
+    let body_len = u16::from_be_bytes(len_buffer) as usize;
+    if body_len > MAX_FRAME_BODY_LEN {
+        return Err(anyhow::anyhow!("加密帧长度超出限制"));
+    }
+
+    let mut frame = Vec::with_capacity(8 + body_len);
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(&len_buffer);
+    frame.resize(8 + body_len, 0);
+    reader.read_exact(&mut frame[8..]).await?;
+
+    let (payload, _) = codec.decode(&frame)?;
+    Ok(payload)
 }

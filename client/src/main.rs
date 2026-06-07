@@ -2,12 +2,11 @@
 //!
 //! 在本地提供SOCKS5服务，将流量加密后转发到远程服务端
 
-mod config;
 mod client;
+mod config;
 
 use anyhow::Result;
-use tracing::{info, error};
-use tracing_subscriber;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,8 +21,14 @@ async fn main() -> Result<()> {
     let config = match config::ClientConfig::from_file("config/client.toml") {
         Ok(cfg) => {
             info!("⚙️  配置加载成功");
-            info!("📡 远程服务端: {}:{}", cfg.server.remote_server, cfg.server.remote_port);
-            info!("🔌 本地监听: {}:{}", cfg.local.listen_addr, cfg.local.listen_port);
+            info!(
+                "📡 远程服务端: {}:{}",
+                cfg.server.remote_server, cfg.server.remote_port
+            );
+            info!(
+                "🔌 本地监听: {}:{}",
+                cfg.local.listen_addr, cfg.local.listen_port
+            );
             cfg
         }
         Err(e) => {

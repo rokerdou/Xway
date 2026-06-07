@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{error::ProxyError, Result};
+
 /// 认证配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -38,12 +40,24 @@ impl Default for AuthConfig {
     }
 }
 
+impl AuthConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.enabled && self.shared_secret.len() < 16 {
+            return Err(ProxyError::Config(
+                "认证密钥至少需要16字节，请在配置文件中设置 auth.shared_secret".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
 
 fn default_shared_secret() -> String {
-    "my_secret_key_12345".to_string()  // ✅ 与配置文件保持一致
+    String::new()
 }
 
 fn default_username() -> String {

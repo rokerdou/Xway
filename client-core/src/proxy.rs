@@ -1,15 +1,18 @@
 //! SOCKS5代理客户端核心逻辑
 
-use crate::{ClientConfig, ProxyStatus, Result, ConnectionGuard};
-use shared::{AuthPacket, KingObj, generate_first_auth_byte};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, error, debug};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Semaphore;
+use crate::{ClientConfig, ConnectionGuard, ProxyStatus, Result};
+use shared::{
+    encode_obfuscated_frame, generate_first_auth_byte, AuthPacket, FrameCodec, DEFAULT_MAX_PADDING,
+    MAX_FRAME_BODY_LEN,
+};
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
+use tracing::{debug, error, info};
 
 /// SOCKS5代理客户端
 pub struct ProxyClient {
@@ -30,6 +33,7 @@ pub struct ProxyClient {
 impl ProxyClient {
     /// 创建新的代理客户端
     pub fn new(config: ClientConfig) -> Result<Self> {
+        config.auth.validate()?;
         let semaphore = Arc::new(Semaphore::new(100));
 
         Ok(Self {
@@ -50,7 +54,9 @@ impl ProxyClient {
         }
 
         info!("开始启动代理客户端...");
-        self.status.set_state(crate::state::ProxyState::Starting).await;
+        self.status
+            .set_state(crate::state::ProxyState::Starting)
+            .await;
 
         // 【关键修复】先同步绑定端口，确保端口可用
         info!("步骤1: 绑定端口...");
@@ -58,10 +64,12 @@ impl ProxyClient {
             Ok(l) => {
                 info!("步骤1完成: 端口绑定成功");
                 l
-            },
+            }
             Err(e) => {
                 error!("步骤1失败: {}", e);
-                self.status.set_state(crate::state::ProxyState::Stopped).await;
+                self.status
+                    .set_state(crate::state::ProxyState::Stopped)
+                    .await;
                 return Err(e);
             }
         };
@@ -76,13 +84,17 @@ impl ProxyClient {
         let status = self.status.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_proxy_with_listener(listener, config, semaphore, status, shutdown_rx).await {
+            if let Err(e) =
+                run_proxy_with_listener(listener, config, semaphore, status, shutdown_rx).await
+            {
                 error!("代理运行错误: {}", e);
             }
         });
 
         self.handle = Some(handle);
-        self.status.set_state(crate::state::ProxyState::Running).await;
+        self.status
+            .set_state(crate::state::ProxyState::Running)
+            .await;
 
         info!("步骤2完成: 异步任务已创建");
         info!("✓ SOCKS5代理客户端已启动");
@@ -95,7 +107,9 @@ impl ProxyClient {
             return Ok(());
         }
 
-        self.status.set_state(crate::state::ProxyState::Stopping).await;
+        self.status
+            .set_state(crate::state::ProxyState::Stopping)
+            .await;
 
         // 发送停止信号
         if let Some(tx) = &self.shutdown_tx {
@@ -108,37 +122,38 @@ impl ProxyClient {
         }
 
         self.listener = None;
-        self.status.set_state(crate::state::ProxyState::Stopped).await;
+        self.status
+            .set_state(crate::state::ProxyState::Stopped)
+            .await;
         info!("SOCKS5代理客户端已停止");
         Ok(())
     }
 
     /// 绑定监听端口（同步操作，确保端口可用）
     async fn bind_port(&self) -> Result<TcpListener> {
-        use std::net::{IpAddr, Ipv4Addr};
-
-        let bind_addr = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            self.config.local.listen_port
-        );
+        let bind_addr: SocketAddr = format!(
+            "{}:{}",
+            self.config.local.listen_addr, self.config.local.listen_port
+        )
+        .parse()
+        .map_err(|e| anyhow::anyhow!("无效的本地监听地址: {}", e))?;
 
         info!("尝试绑定端口: {}", bind_addr);
 
-        let listener = TcpListener::bind(&bind_addr).await
-            .map_err(|e| {
-                // 记录详细错误
-                error!("绑定端口失败: {}", e);
+        let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+            // 记录详细错误
+            error!("绑定端口失败: {}", e);
 
-                // 提供详细的错误信息，包括常见错误的中文说明
-                let error_msg = if e.kind() == std::io::ErrorKind::AddrInUse {
-                    format!("端口{}已被占用，请检查是否有其他程序正在使用", bind_addr)
-                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!("权限不足，无法绑定端口{}", bind_addr)
-                } else {
-                    format!("绑定端口{}失败: {}", bind_addr, e)
-                };
-                anyhow::anyhow!("{}", error_msg)
-            })?;
+            // 提供详细的错误信息，包括常见错误的中文说明
+            let error_msg = if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!("端口{}已被占用，请检查是否有其他程序正在使用", bind_addr)
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                format!("权限不足，无法绑定端口{}", bind_addr)
+            } else {
+                format!("绑定端口{}失败: {}", bind_addr, e)
+            };
+            anyhow::anyhow!("{}", error_msg)
+        })?;
 
         info!("✓ 端口绑定成功: {}", bind_addr);
         Ok(listener)
@@ -181,7 +196,7 @@ fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
     {
         use socket2::TcpKeepalive;
         let keepalive = TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))    // 60 秒后开始探测
+            .with_time(Duration::from_secs(60)) // 60 秒后开始探测
             .with_interval(Duration::from_secs(10)); // 每 10 秒探测一次
 
         socket.set_tcp_keepalive(&keepalive)?;
@@ -211,8 +226,12 @@ async fn run_proxy_with_listener(
         info!("活动服务器: {}:{}", active_server.host, active_server.port);
     }
     for server in &config.servers {
-        info!("配置服务器: {}:{} [{}]", server.host, server.port,
-              if server.enabled { "启用" } else { "禁用" });
+        info!(
+            "配置服务器: {}:{} [{}]",
+            server.host,
+            server.port,
+            if server.enabled { "启用" } else { "禁用" }
+        );
     }
 
     loop {
@@ -267,7 +286,7 @@ async fn handle_local_connection(
     // SOCKS5握手
     if let Err(e) = handle_socks5_handshake(&mut local_stream).await {
         error!("SOCKS5握手失败 [{}]: {}", local_addr, e);
-        return Err(e.into());
+        return Err(e);
     }
 
     debug!("SOCKS5握手成功 [{}]", local_addr);
@@ -277,7 +296,7 @@ async fn handle_local_connection(
         Ok(addr) => addr,
         Err(e) => {
             error!("读取SOCKS5请求失败 [{}]: {}", local_addr, e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -288,7 +307,7 @@ async fn handle_local_connection(
         Ok(s) => s,
         Err(e) => {
             error!("无法连接到远程服务端: {}", e);
-            return Err(e.into());
+            return Err(e);
         }
     };
 
@@ -299,7 +318,7 @@ async fn handle_local_connection(
         debug!("发送认证包到远程服务端");
         if let Err(e) = send_auth_packet(&mut remote_stream, &config).await {
             error!("发送认证包失败: {}", e);
-            return Err(e.into());
+            return Err(e);
         }
         info!("认证包发送成功");
     }
@@ -307,18 +326,18 @@ async fn handle_local_connection(
     // 发送目标地址
     if let Err(e) = send_target_address(&mut remote_stream, &target_addr, &config).await {
         error!("发送目标地址失败: {}", e);
-        return Err(e.into());
+        return Err(e);
     }
 
     // 发送成功响应
     if let Err(e) = send_socks5_success_response(&mut local_stream).await {
         error!("发送SOCKS5响应失败: {}", e);
-        return Err(e.into());
+        return Err(e);
     }
 
     // 数据转发
     info!("开始数据转发 [{}]", local_addr);
-    relay_with_encryption(local_stream, remote_stream, &status).await?;
+    relay_with_encryption(local_stream, remote_stream, config, &status).await?;
 
     Ok(())
 }
@@ -417,7 +436,8 @@ async fn read_socks5_request(stream: &mut TcpStream) -> anyhow::Result<shared::T
 
 /// 连接到远程服务端
 async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpStream> {
-    let server = config.get_active_server()
+    let server = config
+        .get_active_server()
         .ok_or_else(|| anyhow::anyhow!("没有可用的服务器配置"))?;
 
     let addr = if server.host.contains(':') {
@@ -430,46 +450,19 @@ async fn connect_to_remote_server(config: &ClientConfig) -> anyhow::Result<TcpSt
 }
 
 /// 发送目标地址到远程服务端
-async fn send_target_address(stream: &mut TcpStream, target_addr: &shared::TargetAddr, config: &ClientConfig) -> anyhow::Result<()> {
-    use shared::{generate_protocol_prefix, generate_first_auth_byte};
-
-    // 从共享密钥中提取首字节用于鉴权
-    let shared_secret_byte = config.auth.shared_secret.as_bytes()
-        .first()
-        .copied()
-        .unwrap_or(0); // 如果密钥为空,使用0
-
-    // 生成鉴权字节（仅基于时间和密钥）
-    let auth_byte = generate_first_auth_byte(shared_secret_byte);
-
-    // 生成带鉴权的协议前缀
-    let protocol_prefix = generate_protocol_prefix(auth_byte);
-
-    // 序列化目标地址
+async fn send_target_address(
+    stream: &mut TcpStream,
+    target_addr: &shared::TargetAddr,
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
     let addr_bytes = target_addr.encode();
-
-    // 加密地址数据
-    let mut king = KingObj::new();
-    let len = addr_bytes.len();
-    let mut encrypted_data = addr_bytes.clone();
-    king.encode(&mut encrypted_data, len)?;
-
-    // 添加协议前缀（满足Ex2规则：前6个可打印ASCII）
-    let final_len = encrypted_data.len() as u16;
-    stream.write_all(&protocol_prefix).await?;
-    stream.write_all(&final_len.to_be_bytes()).await?;
-    stream.write_all(&encrypted_data).await?;
-
+    write_obfuscated_payload(stream, &addr_bytes, config).await?;
     Ok(())
 }
 
 /// 发送SOCKS5成功响应
 async fn send_socks5_success_response(stream: &mut TcpStream) -> anyhow::Result<()> {
-    let response = [
-        0x05, 0x00, 0x00, 0x01,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00,
-    ];
+    let response = [0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     stream.write_all(&response).await?;
     Ok(())
 }
@@ -478,6 +471,7 @@ async fn send_socks5_success_response(stream: &mut TcpStream) -> anyhow::Result<
 async fn relay_with_encryption(
     local_stream: TcpStream,
     remote_stream: TcpStream,
+    config: Arc<ClientConfig>,
     status: &ProxyStatus,
 ) -> anyhow::Result<()> {
     // 启用 TCP Keep-Alive
@@ -488,13 +482,20 @@ async fn relay_with_encryption(
         debug!("设置远程 Keep-Alive 失败: {}", e);
     }
 
-    let mut local_encryptor = KingObj::new();
-    let mut local_decryptor = KingObj::new();
-
     let (mut local_reader, mut local_writer) = local_stream.into_split();
     let (mut remote_reader, mut remote_writer) = remote_stream.into_split();
 
     let read_timeout = Duration::from_secs(80); // 读写超时 80 秒
+    let upload_config = config.clone();
+    let download_config = config;
+    let upload_codec = FrameCodec::new(
+        upload_config.auth.shared_secret.as_bytes(),
+        upload_config.auth.max_time_diff_secs,
+    )?;
+    let download_codec = FrameCodec::new(
+        download_config.auth.shared_secret.as_bytes(),
+        download_config.auth.max_time_diff_secs,
+    )?;
 
     debug!("✓ 读写超时设置为: {} 秒", 80);
 
@@ -525,22 +526,16 @@ async fn relay_with_encryption(
             data.resize(n, 0);
             data.copy_from_slice(&buffer[..n]);
 
-            local_encryptor.encode(&mut data, n)?;
-
-            let len = data.len() as u16;
-
-            // 【修复】添加超时：发送长度前缀
-            let result = timeout(read_timeout, remote_writer.write_all(&len.to_be_bytes())).await;
-            match result {
-                Ok(Ok(_)) => {}
-                _ => {
-                    debug!("本地->远程: 发送长度超时或错误，断开连接");
-                    break;
-                }
-            }
-
-            // 【修复】添加超时：发送数据
-            let result = timeout(read_timeout, remote_writer.write_all(&data)).await;
+            let result = timeout(
+                read_timeout,
+                write_obfuscated_payload_with_codec(
+                    &mut remote_writer,
+                    &data,
+                    &upload_config,
+                    &upload_codec,
+                ),
+            )
+            .await;
             match result {
                 Ok(Ok(_)) => {}
                 _ => {
@@ -557,38 +552,23 @@ async fn relay_with_encryption(
 
     // 远程 -> 本地（解密）
     let r2l = async move {
-        let mut len_buffer = [0u8; 2];
-        let mut buffer = Vec::with_capacity(8192);
-
         loop {
-            // 【修复】添加超时：读取长度前缀
-            let result = timeout(read_timeout, remote_reader.read_exact(&mut len_buffer)).await;
-            match result {
-                Ok(Ok(_)) => {}
+            let buffer = match timeout(
+                read_timeout,
+                read_obfuscated_payload_with_codec(
+                    &mut remote_reader,
+                    &download_config,
+                    &download_codec,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(payload)) => payload,
                 _ => {
-                    debug!("远程->本地: 读取长度超时或错误，断开连接");
+                    debug!("远程->本地: 读取加密帧超时或错误，断开连接");
                     break;
                 }
-            }
-
-            let len = u16::from_be_bytes(len_buffer) as usize;
-
-            buffer.clear();
-            buffer.resize(len, 0);
-
-            // 【修复】添加超时：读取加密数据
-            let result = timeout(read_timeout, remote_reader.read_exact(&mut buffer)).await;
-            match result {
-                Ok(Ok(_)) => {}
-                _ => {
-                    debug!("远程->本地: 读取数据超时或错误，断开连接");
-                    break;
-                }
-            }
-
-            debug!("远程->本地: {} 字节（加密）", len);
-
-            local_decryptor.decode(&mut buffer, len)?;
+            };
 
             // 【修复】添加超时：发送到本地
             let result = timeout(read_timeout, local_writer.write_all(&buffer)).await;
@@ -600,7 +580,7 @@ async fn relay_with_encryption(
                 }
             }
 
-            status.add_download(len as u64);
+            status.add_download(buffer.len() as u64);
         }
 
         Ok::<(), anyhow::Error>(())
@@ -615,12 +595,12 @@ async fn relay_with_encryption(
 }
 
 /// 发送认证包到远程服务端
-async fn send_auth_packet(
-    stream: &mut TcpStream,
-    config: &ClientConfig,
-) -> anyhow::Result<()> {
+async fn send_auth_packet(stream: &mut TcpStream, config: &ClientConfig) -> anyhow::Result<()> {
     // 从共享密钥中提取首字节用于鉴权
-    let shared_secret_byte = config.auth.shared_secret.as_bytes()
+    let shared_secret_byte = config
+        .auth
+        .shared_secret
+        .as_bytes()
         .first()
         .copied()
         .unwrap_or(0); // 如果密钥为空,使用0
@@ -634,13 +614,95 @@ async fn send_auth_packet(
     let auth_packet = AuthPacket::new(
         config.auth.username.clone(),
         config.auth.shared_secret.as_bytes(),
-        config.auth.sequence,
+        next_auth_sequence(),
     );
 
-    // 序列化并加密（带鉴权字节）
-    let mut encryptor = KingObj::new();
-    let encrypted = auth_packet.serialize_encrypted(&mut encryptor, Some(auth_byte))?;
-
-    stream.write_all(&encrypted).await?;
+    let payload = auth_packet.serialize();
+    let frame = encode_obfuscated_frame(
+        &payload,
+        config.auth.shared_secret.as_bytes(),
+        auth_byte,
+        DEFAULT_MAX_PADDING,
+    )?;
+    stream.write_all(&frame).await?;
     Ok(())
+}
+
+fn current_auth_byte(config: &ClientConfig) -> u8 {
+    let shared_secret_byte = config
+        .auth
+        .shared_secret
+        .as_bytes()
+        .first()
+        .copied()
+        .unwrap_or(0);
+    generate_first_auth_byte(shared_secret_byte)
+}
+
+fn next_auth_sequence() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (nanos & u128::from(u64::MAX)) as u64
+}
+
+async fn write_obfuscated_payload<W>(
+    writer: &mut W,
+    payload: &[u8],
+    config: &ClientConfig,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = encode_obfuscated_frame(
+        payload,
+        config.auth.shared_secret.as_bytes(),
+        current_auth_byte(config),
+        DEFAULT_MAX_PADDING,
+    )?;
+    writer.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn write_obfuscated_payload_with_codec<W>(
+    writer: &mut W,
+    payload: &[u8],
+    config: &ClientConfig,
+    codec: &FrameCodec,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = codec.encode(payload, current_auth_byte(config), DEFAULT_MAX_PADDING)?;
+    writer.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn read_obfuscated_payload_with_codec<R>(
+    reader: &mut R,
+    _config: &ClientConfig,
+    codec: &FrameCodec,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0u8; 6];
+    reader.read_exact(&mut prefix).await?;
+
+    let mut len_buffer = [0u8; 2];
+    reader.read_exact(&mut len_buffer).await?;
+    let body_len = u16::from_be_bytes(len_buffer) as usize;
+    if body_len > MAX_FRAME_BODY_LEN {
+        return Err(anyhow::anyhow!("加密帧长度超出限制"));
+    }
+
+    let mut frame = Vec::with_capacity(8 + body_len);
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(&len_buffer);
+    frame.resize(8 + body_len, 0);
+    reader.read_exact(&mut frame[8..]).await?;
+
+    let (payload, _) = codec.decode(&frame)?;
+    Ok(payload)
 }

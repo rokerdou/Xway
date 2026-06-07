@@ -1,9 +1,9 @@
 //! 客户端配置管理
 
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use shared::AuthConfig;
+use std::path::{Path, PathBuf};
 
 /// 客户端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,15 +34,8 @@ pub struct ServerConfig {
     pub enabled: bool,
 }
 
-fn default_enabled() -> bool { true }
-
-/// 远程服务端设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteServerSettings {
-    /// 远程服务器地址
-    pub remote_server: String,
-    /// 远程服务器端口
-    pub remote_port: u16,
+fn default_enabled() -> bool {
+    true
 }
 
 /// 本地设置
@@ -66,25 +59,28 @@ pub struct LoggingSettings {
 }
 
 // 默认值函数
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_dir() -> String { "./logs".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_dir() -> String {
+    "./logs".to_string()
+}
 
 impl ClientConfig {
     /// 从文件加载配置
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("无法读取配置文件: {}", e))?;
-        let config: ClientConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
+        let config: ClientConfig =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
         Ok(config)
     }
 
     /// 保存配置到文件
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| anyhow::anyhow!("序列化配置失败: {}", e))?;
-        std::fs::write(path, content)
-            .map_err(|e| anyhow::anyhow!("写入配置文件失败: {}", e))?;
+        let content =
+            toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("序列化配置失败: {}", e))?;
+        std::fs::write(path, content).map_err(|e| anyhow::anyhow!("写入配置文件失败: {}", e))?;
         Ok(())
     }
 
@@ -99,14 +95,12 @@ impl ClientConfig {
     /// 创建默认配置
     pub fn default_config() -> Self {
         Self {
-            servers: vec![
-                ServerConfig {
-                    id: 1,
-                    host: "127.0.0.1".to_string(),
-                    port: 1080,
-                    enabled: true,
-                }
-            ],
+            servers: vec![ServerConfig {
+                id: 1,
+                host: "127.0.0.1".to_string(),
+                port: 1080,
+                enabled: true,
+            }],
             local: LocalSettings {
                 listen_addr: "127.0.0.1".to_string(),
                 listen_port: 1081,
@@ -121,7 +115,10 @@ impl ClientConfig {
 
     /// 获取第一个启用的服务器
     pub fn get_active_server(&self) -> Option<&ServerConfig> {
-        self.servers.iter().find(|s| s.enabled).or_else(|| self.servers.first())
+        self.servers
+            .iter()
+            .find(|s| s.enabled)
+            .or_else(|| self.servers.first())
     }
 
     /// 加载或创建默认配置

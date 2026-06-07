@@ -1,10 +1,10 @@
 //! Tauri GUI 应用
 
 use client_core::{ClientConfig, ProxyClient, TrafficStats};
-use std::sync::Arc;
-use tauri::{State, Manager};
-use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::{Manager, State};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -41,15 +41,13 @@ async fn start_proxy(state: State<'_, AppState>) -> Result<(), String> {
 
     let config = state.config.lock().await.clone();
 
-    let mut client = ProxyClient::new(config)
-        .map_err(|e| format!("创建代理客户端失败: {}", e))?;
+    let mut client = ProxyClient::new(config).map_err(|e| format!("创建代理客户端失败: {}", e))?;
 
     // 【关键】现在start()会同步绑定端口，如果端口被占用会立即返回详细错误
-    client.start().await
-        .map_err(|e| {
-            // anyhow::Error转换为String，保留完整错误信息
-            e.to_string()
-        })?;
+    client.start().await.map_err(|e| {
+        // anyhow::Error转换为String，保留完整错误信息
+        e.to_string()
+    })?;
 
     *proxy_guard = Some(client);
     Ok(())
@@ -61,7 +59,9 @@ async fn stop_proxy(state: State<'_, AppState>) -> Result<(), String> {
     let mut proxy_guard = state.proxy.lock().await;
 
     if let Some(mut client) = proxy_guard.take() {
-        client.stop().await
+        client
+            .stop()
+            .await
             .map_err(|e| format!("停止代理失败: {}", e))?;
     }
 
@@ -77,14 +77,11 @@ async fn get_local_proxy_port(state: State<'_, AppState>) -> Result<u16, String>
 
 /// 更新本地代理端口配置
 #[tauri::command]
-async fn update_local_proxy_port(
-    state: State<'_, AppState>,
-    port: u16,
-) -> Result<(), String> {
+async fn update_local_proxy_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
     let mut config = state.config.lock().await;
 
     // 检查端口范围
-    if port < 1024 || port > 65535 {
+    if port < 1024 {
         return Err("端口必须在1024-65535之间".to_string());
     }
 
@@ -99,10 +96,10 @@ async fn update_local_proxy_port(
     // 保存配置
     let config_path = ClientConfig::default_config_path();
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
-    config.save_to_file(&config_path)
+    config
+        .save_to_file(&config_path)
         .map_err(|e| format!("保存配置失败: {}", e))?;
 
     tracing::info!("✅ 本地代理端口已更新为: {}", port);
@@ -143,8 +140,8 @@ async fn get_proxy_status(state: State<'_, AppState>) -> Result<String, String> 
 
 /// 检查端口是否在监听
 async fn check_port_listening(port: u16) -> bool {
-    use tokio::net::TcpListener;
     use std::net::SocketAddr;
+    use tokio::net::TcpListener;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
@@ -184,10 +181,10 @@ async fn update_config(
     // 保存配置
     let config_path = ClientConfig::default_config_path();
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
-    config.save_to_file(&config_path)
+    config
+        .save_to_file(&config_path)
         .map_err(|e| format!("保存配置失败: {}", e))?;
 
     Ok(())
@@ -208,12 +205,16 @@ async fn get_config(state: State<'_, AppState>) -> Result<(String, u16), String>
 #[tauri::command]
 async fn get_servers_config(state: State<'_, AppState>) -> Result<Vec<ServerConfig>, String> {
     let config = state.config.lock().await;
-    let servers: Vec<ServerConfig> = config.servers.iter().map(|s| ServerConfig {
-        id: s.id,
-        host: s.host.clone(),
-        port: s.port,
-        enabled: s.enabled,
-    }).collect();
+    let servers: Vec<ServerConfig> = config
+        .servers
+        .iter()
+        .map(|s| ServerConfig {
+            id: s.id,
+            host: s.host.clone(),
+            port: s.port,
+            enabled: s.enabled,
+        })
+        .collect();
     Ok(servers)
 }
 
@@ -226,20 +227,23 @@ async fn update_servers_config(
     let mut config = state.config.lock().await;
 
     // 转换为客户端配置格式
-    config.servers = servers.iter().map(|s| client_core::ServerConfig {
-        id: s.id,
-        host: s.host.clone(),
-        port: s.port,
-        enabled: s.enabled,
-    }).collect();
+    config.servers = servers
+        .iter()
+        .map(|s| client_core::ServerConfig {
+            id: s.id,
+            host: s.host.clone(),
+            port: s.port,
+            enabled: s.enabled,
+        })
+        .collect();
 
     // 保存配置
     let config_path = ClientConfig::default_config_path();
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
-    config.save_to_file(&config_path)
+    config
+        .save_to_file(&config_path)
         .map_err(|e| format!("保存配置失败: {}", e))?;
 
     Ok(())
@@ -248,10 +252,7 @@ async fn update_servers_config(
 /// 测试服务器时延
 /// 通过TCP连接测量服务器响应时间（毫秒）
 #[tauri::command]
-async fn test_server_latency(
-    server: String,
-    port: u16,
-) -> Result<u64, String> {
+async fn test_server_latency(server: String, port: u16) -> Result<u64, String> {
     use std::time::Instant;
 
     let addr = format!("{}:{}", server, port);
@@ -278,7 +279,8 @@ async fn set_system_proxy(enabled: bool, port: u16) -> Result<String, String> {
     use std::process::Command;
 
     // 获取当前网络服务（通常是Wi-Fi或Ethernet）
-    let get_service_script = "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
+    let get_service_script =
+        "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
 
     let service_output = Command::new("osascript")
         .arg("-e")
@@ -286,7 +288,9 @@ async fn set_system_proxy(enabled: bool, port: u16) -> Result<String, String> {
         .output()
         .map_err(|e| format!("获取网络服务失败: {}", e))?;
 
-    let service_name = String::from_utf8_lossy(&service_output.stdout).trim().to_string();
+    let service_name = String::from_utf8_lossy(&service_output.stdout)
+        .trim()
+        .to_string();
     tracing::info!("检测到网络服务: {}", service_name);
 
     if service_name.is_empty() {
@@ -379,19 +383,32 @@ async fn set_system_proxy(enabled: bool, port: u16) -> Result<String, String> {
 
         if socks_success && http_disabled {
             let message = if enabled {
-                format!("✅ 系统代理已启用: 127.0.0.1:{} (服务: {})\n💡 已自动禁用HTTP/HTTPS代理", port, service_name)
+                format!(
+                    "✅ 系统代理已启用: 127.0.0.1:{} (服务: {})\n💡 已自动禁用HTTP/HTTPS代理",
+                    port, service_name
+                )
             } else {
-                format!("✅ 系统代理已禁用 (服务: {})\n💡 HTTP/HTTPS代理也已禁用", service_name)
+                format!(
+                    "✅ 系统代理已禁用 (服务: {})\n💡 HTTP/HTTPS代理也已禁用",
+                    service_name
+                )
             };
             tracing::info!("{}", message);
             return Ok(message);
         } else {
-            tracing::warn!("验证失败 - SOCKS成功: {}, HTTP已禁用: {}", socks_success, http_disabled);
-            return Err(format!("命令已执行但验证失败，请手动检查设置"));
+            tracing::warn!(
+                "验证失败 - SOCKS成功: {}, HTTP已禁用: {}",
+                socks_success,
+                http_disabled
+            );
+            return Err("命令已执行但验证失败，请手动检查设置".to_string());
         }
     }
 
-    Err(format!("命令执行失败 (exit code: {:?})", output.status.code()))
+    Err(format!(
+        "命令执行失败 (exit code: {:?})",
+        output.status.code()
+    ))
 }
 
 /// 获取代理环境变量配置
@@ -414,7 +431,8 @@ async fn check_system_proxy_status() -> Result<bool, String> {
     use std::process::Command;
 
     // 获取当前网络服务
-    let get_service_script = "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
+    let get_service_script =
+        "do shell script \"networksetup -listallnetworkservices | head -2 | tail -1\"";
 
     let service_output = Command::new("osascript")
         .arg("-e")
@@ -422,7 +440,9 @@ async fn check_system_proxy_status() -> Result<bool, String> {
         .output()
         .map_err(|e| format!("获取网络服务失败: {}", e))?;
 
-    let service_name = String::from_utf8_lossy(&service_output.stdout).trim().to_string();
+    let service_name = String::from_utf8_lossy(&service_output.stdout)
+        .trim()
+        .to_string();
 
     if service_name.is_empty() {
         return Ok(false);
@@ -476,7 +496,10 @@ async fn check_system_proxy_status() -> Result<bool, String> {
 
     tracing::info!(
         "系统代理状态检查 - SOCKS: {}, HTTP: {}, HTTPS: {}, service: {}",
-        socks_enabled, http_enabled, https_enabled, service_name
+        socks_enabled,
+        http_enabled,
+        https_enabled,
+        service_name
     );
 
     // 只有SOCKS代理启用时才返回true
@@ -487,8 +510,7 @@ async fn check_system_proxy_status() -> Result<bool, String> {
 #[tauri::command]
 async fn close_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        window.close()
-            .map_err(|e| format!("关闭窗口失败: {}", e))?;
+        window.close().map_err(|e| format!("关闭窗口失败: {}", e))?;
     }
     Ok(())
 }
@@ -497,7 +519,8 @@ async fn close_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        window.minimize()
+        window
+            .minimize()
             .map_err(|e| format!("最小化窗口失败: {}", e))?;
     }
     Ok(())
@@ -530,15 +553,14 @@ pub fn run() {
         .setup(|app| {
             // 初始化日志
             tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::DEBUG)  // 临时启用DEBUG级别来调试数据传输问题
+                .with_max_level(tracing::Level::DEBUG) // 临时启用DEBUG级别来调试数据传输问题
                 .init();
 
             // 加载配置
-            let config = ClientConfig::load_or_create()
-                .unwrap_or_else(|e| {
-                    eprintln!("加载配置失败，使用默认配置: {}", e);
-                    ClientConfig::default_config()
-                });
+            let config = ClientConfig::load_or_create().unwrap_or_else(|e| {
+                eprintln!("加载配置失败，使用默认配置: {}", e);
+                ClientConfig::default_config()
+            });
 
             // 初始化状态
             let state = AppState {
@@ -604,42 +626,43 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     let _tray = TrayIconBuilder::new()
         .icon(tray_icon)
         .menu(&menu)
-        .show_menu_on_left_click(false)  // 左键点击不显示菜单，改为触发事件
+        .show_menu_on_left_click(false) // 左键点击不显示菜单，改为触发事件
         .tooltip("SOCKS5 代理客户端")
-        .on_menu_event(|app: &tauri::AppHandle, event: tauri::menu::MenuEvent| match event.id.as_ref() {
-            "quit" => {
+        .on_menu_event(|app: &tauri::AppHandle, event: tauri::menu::MenuEvent| {
+            if event.id.as_ref() == "quit" {
                 tracing::info!("📋 点击退出菜单，准备退出...");
                 // 调用退出命令，会先关闭系统代理
                 tauri::async_runtime::block_on(async {
                     let _ = quit_app(app.clone()).await;
                 });
             }
-            _ => {}
         })
-        .on_tray_icon_event(|tray: &tauri::tray::TrayIcon<_>, event: tauri::tray::TrayIconEvent| {
-            tracing::info!("🖱️ 托盘图标事件: {:?}", event);
+        .on_tray_icon_event(
+            |tray: &tauri::tray::TrayIcon<_>, event: tauri::tray::TrayIconEvent| {
+                tracing::info!("🖱️ 托盘图标事件: {:?}", event);
 
-            let app = tray.app_handle();
-            if let Some(window) = app.get_webview_window("main") {
-                match event {
-                    tauri::tray::TrayIconEvent::Click { .. } => {
-                        // 单击：显示/隐藏窗口
-                        if window.is_visible().unwrap_or(false) {
-                            let _ = window.hide();
-                        } else {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    match event {
+                        tauri::tray::TrayIconEvent::Click { .. } => {
+                            // 单击：显示/隐藏窗口
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        tauri::tray::TrayIconEvent::DoubleClick { .. } => {
+                            // 双击：显示并聚焦窗口
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
+                        _ => {}
                     }
-                    tauri::tray::TrayIconEvent::DoubleClick { .. } => {
-                        // 双击：显示并聚焦窗口
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    _ => {}
                 }
-            }
-        })
+            },
+        )
         .build(app)?;
 
     tracing::info!("✅ 系统托盘已创建（使用 Tauri v2 API）");

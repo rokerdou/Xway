@@ -1,9 +1,9 @@
 //! 客户端配置管理
 
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use shared::AuthConfig;
+use std::path::Path;
 
 /// 客户端配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,16 +48,20 @@ pub struct LoggingSettings {
 }
 
 // 默认值函数
-fn default_log_level() -> String { "debug".to_string() }
-fn default_log_dir() -> String { "./logs".to_string() }
+fn default_log_level() -> String {
+    "debug".to_string()
+}
+fn default_log_dir() -> String {
+    "./logs".to_string()
+}
 
 impl ClientConfig {
     /// 从文件加载配置
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("无法读取配置文件: {}", e))?;
-        let config: ClientConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
+        let config: ClientConfig =
+            toml::from_str(&content).map_err(|e| anyhow::anyhow!("解析配置文件失败: {}", e))?;
         Ok(config)
     }
 

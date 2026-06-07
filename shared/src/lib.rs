@@ -4,22 +4,20 @@
 
 pub mod auth;
 pub mod auth_config;
-pub mod crypto;
 pub mod error;
-pub mod king_maps;
-pub mod popcount;
+pub mod frame;
 pub mod protocol;
+pub mod wire_prefix;
 
 pub use auth::AuthPacket;
 pub use auth_config::AuthConfig;
-pub use crypto::KingObj;
 pub use error::{ProtocolError, Result};
-pub use popcount::{
-    analyze_popcount,
-    generate_protocol_prefix,
-    extract_auth_byte_from_prefix,
-    generate_first_auth_byte,
-    verify_first_auth_byte,
-    PROTOCOL_PREFIX_TEMPLATE,
+pub use frame::{
+    decode_obfuscated_frame, encode_obfuscated_frame, FrameCodec, DEFAULT_MAX_PADDING,
+    MAX_FRAME_BODY_LEN,
 };
 pub use protocol::*;
+pub use wire_prefix::{
+    extract_auth_byte_from_prefix, generate_first_auth_byte, generate_protocol_prefix,
+    verify_first_auth_byte, PROTOCOL_PREFIX_TEMPLATE,
+};
