@@ -2,10 +2,8 @@
 //!
 //! 在本地提供SOCKS5服务，将流量加密后转发到远程服务端
 
-mod client;
-mod config;
-
 use anyhow::Result;
+use client_core::{ClientConfig, ProxyClient};
 use tracing::info;
 
 #[tokio::main]
@@ -18,12 +16,15 @@ async fn main() -> Result<()> {
     info!("🚀 SOCKS5代理客户端启动中...");
 
     // 加载配置
-    let config = match config::ClientConfig::from_file("config/client.toml") {
+    let config = match ClientConfig::from_file("config/client.toml") {
         Ok(cfg) => {
             info!("⚙️  配置加载成功");
             info!(
                 "📡 远程服务端: {}:{}",
-                cfg.server.remote_server, cfg.server.remote_port
+                cfg.get_active_server()
+                    .map(|s| s.host.as_str())
+                    .unwrap_or("none"),
+                cfg.get_active_server().map(|s| s.port).unwrap_or(0)
             );
             info!(
                 "🔌 本地监听: {}:{}",
@@ -33,15 +34,15 @@ async fn main() -> Result<()> {
         }
         Err(e) => {
             info!("⚠️  无法加载配置文件，使用默认配置: {}", e);
-            config::ClientConfig::default_config()
+            ClientConfig::default_config()
         }
     };
 
     // 创建客户端
-    let client = client::ProxyClient::new(config)?;
-
-    // 启动客户端
-    client.run().await?;
+    let mut client = ProxyClient::new(config)?;
+    client.start().await?;
+    tokio::signal::ctrl_c().await?;
+    client.stop().await?;
 
     Ok(())
 }

@@ -33,7 +33,7 @@ pub fn generate_first_auth_byte(shared_secret: u8) -> u8 {
     ((minute_digit + shared_secret as u32) % 9) as u8
 }
 
-/// Verify first-byte auth within a backward-looking time tolerance.
+/// Verify first-byte auth within a symmetric clock-skew tolerance.
 pub fn verify_first_auth_byte(received: u8, shared_secret: u8, time_tolerance_secs: u64) -> bool {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -46,11 +46,17 @@ pub fn verify_first_auth_byte(received: u8, shared_secret: u8, time_tolerance_se
         .unwrap_or_default()
         .as_secs();
 
-    for offset in 0..=(time_tolerance_secs / 60) {
-        let minute = (((now / 60).saturating_sub(offset)) % 10) as u32;
-        let expected = ((minute + shared_secret as u32) % 9) as u8;
-        if received == expected {
-            return true;
+    let current_minute = now / 60;
+    let tolerance = time_tolerance_secs.div_ceil(60);
+    for offset in 0..=tolerance {
+        for minute in [
+            current_minute.saturating_sub(offset),
+            current_minute.saturating_add(offset),
+        ] {
+            let expected = (((minute % 10) as u32 + shared_secret as u32) % 9) as u8;
+            if received == expected {
+                return true;
+            }
         }
     }
 

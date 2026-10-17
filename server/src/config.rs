@@ -31,6 +31,9 @@ pub struct ServerSettings {
     /// 超时时间（秒）
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// 完成加密握手的最长时间（秒）
+    #[serde(default = "default_handshake_timeout")]
+    pub handshake_timeout_seconds: u64,
     /// 是否启用IP封禁（Docker部署时应禁用，因为看到的是内网IP）
     #[serde(default = "default_enable_ip_ban")]
     pub enable_ip_ban: bool,
@@ -67,7 +70,10 @@ fn default_max_connections() -> usize {
 }
 fn default_timeout() -> u64 {
     80
-} // 读写超时 80 秒
+}
+fn default_handshake_timeout() -> u64 {
+    10
+}
 fn default_enable_ip_ban() -> bool {
     false
 } // 默认禁用IP封禁（Docker友好）
@@ -105,6 +111,7 @@ impl ServerConfig {
                 listen_port: 1080,
                 max_connections: default_max_connections(),
                 timeout_seconds: default_timeout(),
+                handshake_timeout_seconds: default_handshake_timeout(),
                 enable_ip_ban: default_enable_ip_ban(),
             },
             logging: LoggingSettings {

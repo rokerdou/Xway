@@ -16,8 +16,11 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+use hkdf::Hkdf;
 use rand::{rngs::OsRng, Rng, RngCore};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     error::{ProtocolError, ProxyError},
@@ -38,7 +41,7 @@ fn crypto_err(message: impl Into<String>) -> ProxyError {
     ProxyError::Crypto(message.into())
 }
 
-fn cipher_from_secret(shared_secret: &[u8]) -> Result<Aes256Gcm> {
+fn key_from_secret(shared_secret: &[u8]) -> Result<[u8; 32]> {
     if shared_secret.is_empty() {
         return Err(ProtocolError::AuthenticationFailed.into());
     }
@@ -46,26 +49,66 @@ fn cipher_from_secret(shared_secret: &[u8]) -> Result<Aes256Gcm> {
     let mut hasher = Sha256::new();
     hasher.update(b"xway-frame-v1");
     hasher.update(shared_secret);
-    let key = hasher.finalize();
+    Ok(hasher.finalize().into())
+}
 
-    Aes256Gcm::new_from_slice(&key).map_err(|_| crypto_err("无法创建AES-GCM加密器"))
+#[derive(Debug, Clone, Copy)]
+pub enum SessionDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+impl SessionDirection {
+    fn label(self) -> &'static [u8] {
+        match self {
+            Self::ClientToServer => b"xway-session-c2s-v2",
+            Self::ServerToClient => b"xway-session-s2c-v2",
+        }
+    }
 }
 
 /// Per-connection frame codec. It keeps the derived AEAD key hot instead of
 /// hashing the shared secret for every data frame.
-#[derive(Clone)]
 pub struct FrameCodec {
     cipher: Aes256Gcm,
     shared_secret_byte: u8,
     max_time_diff_secs: u64,
+    nonce_prefix: [u8; 4],
+    nonce_counter: AtomicU64,
 }
 
 impl FrameCodec {
     pub fn new(shared_secret: &[u8], max_time_diff_secs: u64) -> Result<Self> {
+        let key = key_from_secret(shared_secret)?;
+        Self::from_key(&key, shared_secret, max_time_diff_secs)
+    }
+
+    pub fn new_session(
+        shared_secret: &[u8],
+        salt: &[u8],
+        direction: SessionDirection,
+        max_time_diff_secs: u64,
+    ) -> Result<Self> {
+        if shared_secret.is_empty() || salt.is_empty() {
+            return Err(ProtocolError::AuthenticationFailed.into());
+        }
+        let hkdf = Hkdf::<Sha256>::new(Some(salt), shared_secret);
+        let mut key = [0u8; 32];
+        hkdf.expand(direction.label(), &mut key)
+            .map_err(|_| crypto_err("无法派生会话密钥"))?;
+        Self::from_key(&key, shared_secret, max_time_diff_secs)
+    }
+
+    fn from_key(key: &[u8; 32], shared_secret: &[u8], max_time_diff_secs: u64) -> Result<Self> {
+        let mut nonce_prefix = [0u8; 4];
+        OsRng.fill_bytes(&mut nonce_prefix);
         Ok(Self {
-            cipher: cipher_from_secret(shared_secret)?,
+            cipher: Aes256Gcm::new_from_slice(key)
+                .map_err(|_| crypto_err("无法创建AES-GCM加密器"))?,
             shared_secret_byte: shared_secret.first().copied().unwrap_or(0),
             max_time_diff_secs,
+            nonce_prefix,
+            nonce_counter: AtomicU64::new(0),
         })
     }
 
@@ -103,8 +146,13 @@ impl FrameCodec {
             plaintext.extend_from_slice(&padding);
         }
 
+        let counter = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
+        if counter == u64::MAX {
+            return Err(crypto_err("帧 nonce 计数器耗尽"));
+        }
         let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        nonce[..4].copy_from_slice(&self.nonce_prefix);
+        nonce[4..].copy_from_slice(&counter.to_be_bytes());
 
         let ciphertext = self
             .cipher
@@ -172,6 +220,32 @@ impl FrameCodec {
             auth_byte,
         ))
     }
+}
+
+pub async fn read_encrypted_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
+    let mut header = [0u8; PREFIX_LEN + LEN_LEN];
+    reader.read_exact(&mut header).await?;
+    let body_len = u16::from_be_bytes([header[PREFIX_LEN], header[PREFIX_LEN + 1]]) as usize;
+    if !(NONCE_LEN + GCM_TAG_LEN + HEADER_LEN..=MAX_FRAME_BODY_LEN).contains(&body_len) {
+        return Err(ProtocolError::InvalidLength.into());
+    }
+    let mut frame = Vec::with_capacity(header.len() + body_len);
+    frame.extend_from_slice(&header);
+    frame.resize(header.len() + body_len, 0);
+    reader.read_exact(&mut frame[header.len()..]).await?;
+    Ok(frame)
+}
+
+pub async fn write_encrypted_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    codec: &FrameCodec,
+    payload: &[u8],
+    auth_byte: u8,
+    max_padding: usize,
+) -> Result<()> {
+    let frame = codec.encode(payload, auth_byte, max_padding)?;
+    writer.write_all(&frame).await?;
+    Ok(())
 }
 
 /// Convenience wrapper for one-off frames.

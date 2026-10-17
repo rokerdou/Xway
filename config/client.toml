@@ -1,18 +1,19 @@
-[server]
-remote_server = "72.61.180.33"
-remote_port = 1080
+[[servers]]
+id = 1
+host = "127.0.0.1"
+port = 1080
+enabled = true
 
 [local]
 listen_addr = "127.0.0.1"
 listen_port = 1081
 
 [logging]
-level = "debug"
+level = "info"
 log_dir = "./logs"
 
 [auth]
 enabled = true
-shared_secret = "my_secret_key_12345"
+shared_secret = "replace-with-a-random-secret"
 username = "client"
-sequence = 1
 max_time_diff_secs = 300

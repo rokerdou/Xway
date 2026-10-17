@@ -173,11 +173,7 @@ impl AuthPacket {
             .as_secs();
 
         // 检查时间戳是否在允许范围内
-        if self.timestamp > current_time {
-            return Err(ProtocolError::GeneralFailure("时间戳在未来".to_string()).into());
-        }
-
-        let time_diff = current_time.saturating_sub(self.timestamp);
+        let time_diff = current_time.abs_diff(self.timestamp);
         if time_diff > max_time_diff_secs {
             return Err(ProtocolError::GeneralFailure(format!(
                 "时间戳过期（超过{}秒）",
@@ -391,7 +387,27 @@ mod tests {
 
         // 测试过期时间戳
         packet.timestamp = packet.timestamp.saturating_sub(301);
+        packet.hmac = AuthPacket::compute_hmac(
+            &packet.username,
+            packet.timestamp,
+            packet.sequence,
+            shared_secret,
+        );
         let result = packet.verify(shared_secret, 300);
         assert!(result.is_err());
+
+        // 客户端时钟略快也应该被允许。
+        packet.timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 30;
+        packet.hmac = AuthPacket::compute_hmac(
+            &packet.username,
+            packet.timestamp,
+            packet.sequence,
+            shared_secret,
+        );
+        assert!(packet.verify(shared_secret, 300).is_ok());
     }
 }

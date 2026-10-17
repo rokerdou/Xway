@@ -21,13 +21,6 @@ pub enum AuthMethod {
     UserPass = 0x02,
     /// 无可接受的认证方法
     NoAcceptable = 0xFF,
-
-    /// IANA分配的私有方法
-    IanaStart = 0x03,
-    IanaEnd = 0x7F,
-    /// 私有方法
-    PrivateStart = 0x80,
-    PrivateEnd = 0xFE,
 }
 
 impl AuthMethod {
