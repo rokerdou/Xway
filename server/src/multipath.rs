@@ -12,6 +12,7 @@ use shared::{
     DEFAULT_MAX_PADDING, MAX_SUBFLOWS, SESSION_SALT_LEN, STREAM_FLAG_FIN,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{
@@ -237,6 +238,7 @@ fn spawn_subflow_writer(
     codec: FrameCodec,
     secret_byte: u8,
     mut rx: mpsc::Receiver<Downlink>,
+    queued: Arc<AtomicUsize>,
     dead: watch::Sender<bool>,
 ) -> tokio::task::JoinHandle<u64> {
     tokio::spawn(async move {
@@ -258,6 +260,7 @@ fn spawn_subflow_writer(
                 dead.send_replace(true);
                 break;
             }
+            queued.fetch_sub(1, Ordering::Relaxed);
             sent += bytes;
         }
         let _ = writer.shutdown().await;
@@ -265,8 +268,10 @@ fn spawn_subflow_writer(
     })
 }
 
-/// 下行分摊中继：把 target 数据按字节偏移打成流帧，round-robin 发往各
-/// 子流。任一子流写失败即判定会话死亡（v1 无重传语义）。
+/// 下行分摊中继：把 target 数据按字节偏移打成流帧，发往队列最空的子流
+/// （最短队列调度）。慢子流队列积压后自动绕开，客户端乱序窗口被限制
+/// 在单子流队列容量内，链路抖动不再冲爆 reorder 缓冲。任一子流写失败
+/// 即判定会话死亡（v1 无重传语义）。
 async fn relay_download_striped<R: AsyncRead + Unpin>(
     target_reader: &mut R,
     writers: Vec<(u8, BoxWriter, FrameCodec)>,
@@ -276,20 +281,29 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
     let (dead_tx, mut dead_rx) = watch::channel(false);
     let mut handles = Vec::with_capacity(writers.len());
     let mut senders = Vec::with_capacity(writers.len());
+    let mut queues = Vec::with_capacity(writers.len());
     let mut indexes = Vec::with_capacity(writers.len());
     for (index, writer, codec) in writers {
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
-        senders.push(tx);
+        let queued = Arc::new(AtomicUsize::new(0));
+        senders.push((tx, queued.clone()));
+        queues.push(queued.clone());
         indexes.push(index);
-        handles.push(spawn_subflow_writer(index, writer, codec, secret_byte, rx, dead_tx.clone()));
+        handles.push(spawn_subflow_writer(
+            index,
+            writer,
+            codec,
+            secret_byte,
+            rx,
+            queued.clone(),
+            dead_tx.clone(),
+        ));
     }
     drop(dead_tx);
 
     let started = Instant::now();
     let mut buffer = vec![0u8; max_payload];
     let mut offset: u64 = 0;
-    let mut next = 0usize;
-    let count = senders.len();
     let result = loop {
         tokio::select! {
             changed = dead_rx.changed() => {
@@ -304,15 +318,23 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
                 }
                 let payload = encode_stream_payload(0, offset, &buffer[..n]);
                 offset += n as u64;
-                if senders[next].send(Downlink::Data(payload)).await.is_err() {
+                // 最短队列调度：打满一条后它不再最短，自然轮转；慢子流
+                // 队列积压时被自动绕开，客户端乱序窗口收敛。
+                let next = queues
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, q)| q.load(Ordering::Relaxed))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                queues[next].fetch_add(1, Ordering::Relaxed);
+                if senders[next].0.send(Downlink::Data(payload)).await.is_err() {
                     break Err(anyhow::anyhow!("multipath subflow {} writer closed", indexes[next]));
                 }
-                next = (next + 1) % count;
             }
         }
     };
     if result.is_ok() {
-        for tx in &senders {
+        for (tx, _) in &senders {
             let _ = tx.send(Downlink::Fin(offset)).await;
         }
     }
