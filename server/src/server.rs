@@ -1,9 +1,10 @@
 //! Encrypted TCP tunnel server.
 use crate::config::ServerConfig;
 use crate::defense::{DefenseConfig, DefenseManager};
+use crate::multipath::{self, SessionRegistry};
 use shared::{
-    extract_auth_byte_from_prefix, generate_first_auth_byte, read_encrypted_frame,
-    verify_first_auth_byte, write_encrypted_frame, AuthPacket, ClientHello, ConnectResponse,
+    derive_session_id, extract_auth_byte_from_prefix, generate_first_auth_byte,
+    read_encrypted_frame, verify_first_auth_byte, write_encrypted_frame, AuthPacket, ClientHello,
     FrameCodec, Result, SessionDirection, TargetAddr, DEFAULT_MAX_PADDING, SESSION_SALT_LEN,
 };
 use std::{
@@ -23,6 +24,7 @@ pub struct ProxyServer {
     config: Arc<ServerConfig>,
     semaphore: Arc<Semaphore>,
     defense: Arc<DefenseManager>,
+    multipath: Arc<SessionRegistry>,
 }
 static AUTH_REPLAY_CACHE: OnceLock<Mutex<HashMap<[u8; 32], u64>>> = OnceLock::new();
 
@@ -39,10 +41,20 @@ impl ProxyServer {
                 cleanup.cleanup().await;
             }
         });
+        let multipath = SessionRegistry::new();
+        let sweeper = multipath.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                sweeper.sweep().await;
+            }
+        });
         Ok(Self {
             config: Arc::new(config),
             semaphore,
             defense,
+            multipath,
         })
     }
 
@@ -69,9 +81,12 @@ impl ProxyServer {
             };
             let config = self.config.clone();
             let defense = self.defense.clone();
+            let multipath = self.multipath.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(err) = handle_client_connection(stream, address, config, defense).await {
+                if let Err(err) =
+                    handle_client_connection(stream, address, config, defense, multipath).await
+                {
                     debug!("connection {address} closed: {err}");
                 }
             });
@@ -79,9 +94,18 @@ impl ProxyServer {
     }
 }
 
-struct SessionCodecs {
-    inbound: FrameCodec,
-    outbound: FrameCodec,
+pub(crate) struct SessionCodecs {
+    pub(crate) inbound: FrameCodec,
+    pub(crate) outbound: FrameCodec,
+}
+
+/// 多路会话协商结果。
+struct SessionPlan {
+    target: TargetAddr,
+    codecs: SessionCodecs,
+    /// 服务端确认的子流总数（1 = 单流，走原有路径）。
+    subflows: u8,
+    joins: Vec<multipath::JoinedSubflow>,
 }
 
 async fn handle_client_connection(
@@ -89,6 +113,7 @@ async fn handle_client_connection(
     client_addr: std::net::SocketAddr,
     config: Arc<ServerConfig>,
     defense: Arc<DefenseManager>,
+    multipath_registry: Arc<SessionRegistry>,
 ) -> anyhow::Result<()> {
     let client_ip = client_addr.ip();
     // Nagle holds the tail segment of every frame until the previous frame is
@@ -99,11 +124,38 @@ async fn handle_client_connection(
     }
     let handshake = timeout(
         Duration::from_secs(config.server.handshake_timeout_seconds),
-        perform_handshake(&mut client, &config),
+        async {
+            let mut prefix = [0u8; 6];
+            client.read_exact(&mut prefix).await?;
+            let received = extract_auth_byte_from_prefix(&prefix)
+                .ok_or_else(|| anyhow::anyhow!("invalid session prelude"))?;
+            if !verify_first_auth_byte(
+                received,
+                config.auth.shared_secret.as_bytes()[0],
+                config.auth.max_time_diff_secs,
+            ) {
+                anyhow::bail!("invalid session prelude authentication");
+            }
+            let mut salt = [0u8; SESSION_SALT_LEN];
+            client.read_exact(&mut salt).await?;
+            let mut marker = [0u8; 1];
+            client.read_exact(&mut marker).await?;
+            if multipath::is_join_index(marker[0]) {
+                multipath::handle_join(client, &config, &multipath_registry, salt, marker[0])
+                    .await?;
+                Ok(HandshakeOutcome::JoinHandled)
+            } else {
+                let plan =
+                    session_handshake(&mut client, &config, &multipath_registry, salt, marker[0])
+                        .await?;
+                Ok(HandshakeOutcome::Session((client, plan)))
+            }
+        },
     )
     .await;
-    let (target, codecs) = match handshake {
-        Ok(Ok(v)) => v,
+    let (mut client, plan) = match handshake {
+        Ok(Ok(HandshakeOutcome::Session(pair))) => pair,
+        Ok(Ok(HandshakeOutcome::JoinHandled)) => return Ok(()),
         Ok(Err(err)) => {
             if config.server.enable_ip_ban {
                 defense.record_auth_failure(client_ip).await;
@@ -120,7 +172,7 @@ async fn handle_client_connection(
     let auth_byte = current_auth_byte(&config);
     let target_stream = match timeout(
         Duration::from_secs(config.server.timeout_seconds),
-        connect_to_target(&target),
+        connect_to_target(&plan.target),
     )
     .await
     {
@@ -128,8 +180,8 @@ async fn handle_client_connection(
         failure => {
             let _ = write_payload(
                 &mut client,
-                &codecs.outbound,
-                &ConnectResponse::Failure.encode(),
+                &plan.codecs.outbound,
+                &multipath::connect_response_payload(false, plan.subflows),
                 auth_byte,
             )
             .await;
@@ -142,47 +194,65 @@ async fn handle_client_connection(
     };
     write_payload(
         &mut client,
-        &codecs.outbound,
-        &ConnectResponse::Success.encode(),
+        &plan.codecs.outbound,
+        &multipath::connect_response_payload(true, plan.subflows),
         auth_byte,
     )
     .await?;
     // Upload direction stalls the same way as the client leg (see above).
     let _ = target_stream.set_nodelay(true);
-    relay_with_encryption(client, target_stream, &config, codecs).await?;
+    if plan.subflows > 1 {
+        let secret_byte = config.auth.shared_secret.as_bytes()[0];
+        multipath::relay_split(
+            client,
+            target_stream,
+            &config,
+            plan.codecs,
+            secret_byte,
+            plan.joins,
+        )
+        .await?;
+    } else {
+        relay_with_encryption(client, target_stream, &config, plan.codecs).await?;
+    }
     Ok(())
 }
 
-async fn perform_handshake(
+/// 读取连接前导（prefix+salt+1 字节标记）后的分发结果。
+enum HandshakeOutcome {
+    /// 会话 0 完成握手；连接归还给外层继续中继。
+    Session((TcpStream, SessionPlan)),
+    /// join 子流已交接给注册表，连接不再属于当前任务。
+    JoinHandled,
+}
+
+/// 会话 0 的完整握手：hello 帧、目标地址帧、多路协商与子流收集。
+/// `marker` 是 hello 帧前缀的第一个字节（'G'）。
+async fn session_handshake(
     stream: &mut TcpStream,
     config: &ServerConfig,
-) -> anyhow::Result<(TargetAddr, SessionCodecs)> {
-    let mut prefix = [0u8; 6];
-    stream.read_exact(&mut prefix).await?;
-    let received = extract_auth_byte_from_prefix(&prefix)
-        .ok_or_else(|| anyhow::anyhow!("invalid session prelude"))?;
-    if !verify_first_auth_byte(
-        received,
-        config.auth.shared_secret.as_bytes()[0],
-        config.auth.max_time_diff_secs,
-    ) {
-        anyhow::bail!("invalid session prelude authentication");
+    registry: &SessionRegistry,
+    salt: [u8; SESSION_SALT_LEN],
+    marker: u8,
+) -> anyhow::Result<SessionPlan> {
+    if marker != b'G' {
+        anyhow::bail!("invalid frame prelude");
     }
-    let mut salt = [0u8; SESSION_SALT_LEN];
-    stream.read_exact(&mut salt).await?;
-    let inbound = FrameCodec::new_session(
+    let inbound = FrameCodec::new_subflow(
         config.auth.shared_secret.as_bytes(),
         &salt,
         SessionDirection::ClientToServer,
+        0,
         config.auth.max_time_diff_secs,
     )?;
-    let outbound = FrameCodec::new_session(
+    let outbound = FrameCodec::new_subflow(
         config.auth.shared_secret.as_bytes(),
         &salt,
         SessionDirection::ServerToClient,
+        0,
         config.auth.max_time_diff_secs,
     )?;
-    let hello = ClientHello::decode(&read_payload(stream, &inbound).await?)?;
+    let hello = ClientHello::decode(&read_payload_with_first_byte(stream, marker, &inbound).await?)?;
     if hello.salt != salt {
         anyhow::bail!("session salt binding mismatch");
     }
@@ -199,7 +269,42 @@ async fn perform_handshake(
     }
     let payload = read_payload(stream, &inbound).await?;
     let target = TargetAddr::decode(&mut payload.as_slice())?;
-    Ok((target, SessionCodecs { inbound, outbound }))
+    let actual = hello
+        .subflows
+        .clamp(1, config.server.max_subflows.max(1));
+    let joins = if actual > 1 {
+        let session_id = derive_session_id(config.auth.shared_secret.as_bytes(), &salt)?;
+        multipath::collect_subflows(registry, session_id, actual).await
+    } else {
+        Vec::new()
+    };
+    Ok(SessionPlan {
+        target,
+        codecs: SessionCodecs { inbound, outbound },
+        subflows: actual,
+        joins,
+    })
+}
+
+/// 帧的第一个字节已被消费为 `first`，读余下部分并组帧。
+async fn read_payload_with_first_byte<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    first: u8,
+    codec: &FrameCodec,
+) -> anyhow::Result<Vec<u8>> {
+    let mut rest_prefix = [0u8; 5];
+    reader.read_exact(&mut rest_prefix).await?;
+    let mut frame = Vec::with_capacity(64);
+    frame.push(first);
+    frame.extend_from_slice(&rest_prefix);
+    let mut len_bytes = [0u8; 2];
+    reader.read_exact(&mut len_bytes).await?;
+    let body_len = u16::from_be_bytes(len_bytes) as usize;
+    frame.extend_from_slice(&len_bytes);
+    let start = frame.len();
+    frame.resize(start + body_len, 0);
+    reader.read_exact(&mut frame[start..]).await?;
+    Ok(codec.decode(&frame)?.0)
 }
 
 async fn connect_to_target(target: &TargetAddr) -> anyhow::Result<TcpStream> {
@@ -224,15 +329,8 @@ async fn relay_with_encryption(
     let max_payload = config.relay.max_buffer_size.clamp(1024, 16 * 1024);
     let auth_byte = current_auth_byte(config);
     let upload = async {
-        loop {
-            match read_payload(&mut client_reader, &codecs.inbound).await {
-                Ok(payload) => target_writer.write_all(&payload).await?,
-                Err(err) if is_eof(&err) => break,
-                Err(err) => return Err(err),
-            }
-        }
-        target_writer.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
+        crate::multipath::relay_upload(&mut client_reader, &mut target_writer, &codecs.inbound)
+            .await
     };
     let download = async {
         let mut buffer = vec![0u8; max_payload];
@@ -256,7 +354,7 @@ async fn relay_with_encryption(
     Ok(())
 }
 
-async fn read_payload<R: AsyncRead + Unpin>(
+pub(crate) async fn read_payload<R: AsyncRead + Unpin>(
     reader: &mut R,
     codec: &FrameCodec,
 ) -> anyhow::Result<Vec<u8>> {
@@ -271,10 +369,10 @@ async fn write_payload<W: AsyncWrite + Unpin>(
     write_encrypted_frame(writer, codec, payload, auth_byte, DEFAULT_MAX_PADDING).await?;
     Ok(())
 }
-fn is_eof(error: &anyhow::Error) -> bool {
+pub(crate) fn is_eof(error: &anyhow::Error) -> bool {
     error.downcast_ref::<shared::error::ProxyError>().is_some_and(|e| matches!(e, shared::error::ProxyError::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof))
 }
-fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+pub(crate) fn set_tcp_keepalive(stream: &TcpStream) -> std::io::Result<()> {
     use socket2::{SockRef, TcpKeepalive};
     SockRef::from(stream).set_tcp_keepalive(
         &TcpKeepalive::new()

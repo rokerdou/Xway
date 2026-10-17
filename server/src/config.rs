@@ -37,6 +37,9 @@ pub struct ServerSettings {
     /// 是否启用IP封禁（Docker部署时应禁用，因为看到的是内网IP）
     #[serde(default = "default_enable_ip_ban")]
     pub enable_ip_ban: bool,
+    /// 单个会话允许的最大多路子流数（含主子流；1=禁用多路）
+    #[serde(default = "default_max_subflows")]
+    pub max_subflows: u8,
 }
 
 /// 日志设置
@@ -77,6 +80,9 @@ fn default_handshake_timeout() -> u64 {
 fn default_enable_ip_ban() -> bool {
     false
 } // 默认禁用IP封禁（Docker友好）
+fn default_max_subflows() -> u8 {
+    4
+}
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -113,6 +119,7 @@ impl ServerConfig {
                 timeout_seconds: default_timeout(),
                 handshake_timeout_seconds: default_handshake_timeout(),
                 enable_ip_ban: default_enable_ip_ban(),
+                max_subflows: default_max_subflows(),
             },
             logging: LoggingSettings {
                 level: default_log_level(),

@@ -14,11 +14,12 @@ pub use auth::AuthPacket;
 pub use auth_config::AuthConfig;
 pub use error::{ProtocolError, Result};
 pub use frame::{
-    decode_obfuscated_frame, encode_obfuscated_frame, read_encrypted_frame, write_encrypted_frame,
-    FrameCodec, SessionDirection, DEFAULT_MAX_PADDING, MAX_FRAME_BODY_LEN,
+    decode_obfuscated_frame, decode_stream_payload, derive_session_id, encode_obfuscated_frame,
+    encode_stream_payload, read_encrypted_frame, write_encrypted_frame, FrameCodec,
+    SessionDirection, DEFAULT_MAX_PADDING, MAX_FRAME_BODY_LEN, STREAM_FLAG_FIN,
 };
 pub use protocol::*;
-pub use session::{ClientHello, ConnectResponse, SESSION_SALT_LEN};
+pub use session::{ClientHello, ConnectResponse, MAX_SUBFLOWS, SESSION_SALT_LEN};
 pub use wire_prefix::{
     extract_auth_byte_from_prefix, generate_first_auth_byte, generate_protocol_prefix,
     verify_first_auth_byte, PROTOCOL_PREFIX_TEMPLATE,

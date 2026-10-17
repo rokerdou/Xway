@@ -8,6 +8,7 @@
 
 mod config;
 mod defense;
+mod multipath;
 mod server;
 
 use anyhow::Result;

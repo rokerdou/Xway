@@ -36,7 +36,9 @@ fn client_server_session_protocol_interoperates() {
         .encode(&ConnectResponse::Success.encode(), auth_byte, 5)
         .unwrap();
     assert_eq!(
-        ConnectResponse::decode(&client_down.decode(&ack).unwrap().0).unwrap(),
+        ConnectResponse::decode(&client_down.decode(&ack).unwrap().0)
+            .unwrap()
+            .0,
         ConnectResponse::Success
     );
     let response = b"HTTP/1.1 200 OK\r\n\r\nhello";

@@ -17,6 +17,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, Rng, RngCore};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +37,47 @@ const HEADER_LEN: usize = 4;
 
 pub const MAX_FRAME_BODY_LEN: usize = u16::MAX as usize;
 pub const DEFAULT_MAX_PADDING: usize = 31;
+
+/// Multipath stream data frames carry `flags(1) + offset(8) + payload`
+/// instead of the raw relay payload.
+pub const STREAM_FLAG_FIN: u8 = 0x01;
+const STREAM_HEADER_LEN: usize = 9;
+
+pub fn encode_stream_payload(flags: u8, offset: u64, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(STREAM_HEADER_LEN + data.len());
+    out.push(flags);
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+pub fn decode_stream_payload(payload: &[u8]) -> Result<(u8, u64, &[u8])> {
+    if payload.len() < STREAM_HEADER_LEN {
+        return Err(ProtocolError::InvalidLength.into());
+    }
+    let flags = payload[0];
+    let offset = u64::from_be_bytes([
+        payload[1], payload[2], payload[3], payload[4], payload[5], payload[6], payload[7],
+        payload[8],
+    ]);
+    Ok((flags, offset, &payload[STREAM_HEADER_LEN..]))
+}
+
+/// Stable session identifier binding the shared secret to the session salt:
+/// the first 16 bytes of `HMAC-SHA256(secret, salt)`. Multipath join
+/// connections use it to find their session in the server registry.
+pub fn derive_session_id(shared_secret: &[u8], salt: &[u8]) -> Result<[u8; 16]> {
+    type HmacSha256 = Hmac<Sha256>;
+    if shared_secret.is_empty() || salt.is_empty() {
+        return Err(ProtocolError::AuthenticationFailed.into());
+    }
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(shared_secret)
+        .map_err(|_| crypto_err("无法创建HMAC"))?;
+    mac.update(salt);
+    Ok(mac.finalize().into_bytes()[..16]
+        .try_into()
+        .expect("HMAC-SHA256 输出至少16字节"))
+}
 
 fn crypto_err(message: impl Into<String>) -> ProxyError {
     ProxyError::Crypto(message.into())
@@ -65,6 +107,21 @@ impl SessionDirection {
             Self::ServerToClient => b"xway-session-s2c-v2",
         }
     }
+
+    /// Subflow 0 keeps the legacy label byte-for-byte so handshake frames stay
+    /// wire-compatible; subflows 1..=7 append their index, giving each TCP
+    /// connection an independent AEAD key (nonce prefixes may then collide
+    /// across subflows without violating GCM).
+    fn subflow_label(self, index: u8) -> Vec<u8> {
+        let base = self.label();
+        if index == 0 {
+            return base.to_vec();
+        }
+        let mut label = Vec::with_capacity(base.len() + 8);
+        label.extend_from_slice(base);
+        label.extend_from_slice(format!("-sf{index}").as_bytes());
+        label
+    }
 }
 
 /// Per-connection frame codec. It keeps the derived AEAD key hot instead of
@@ -89,12 +146,22 @@ impl FrameCodec {
         direction: SessionDirection,
         max_time_diff_secs: u64,
     ) -> Result<Self> {
+        Self::new_subflow(shared_secret, salt, direction, 0, max_time_diff_secs)
+    }
+
+    pub fn new_subflow(
+        shared_secret: &[u8],
+        salt: &[u8],
+        direction: SessionDirection,
+        index: u8,
+        max_time_diff_secs: u64,
+    ) -> Result<Self> {
         if shared_secret.is_empty() || salt.is_empty() {
             return Err(ProtocolError::AuthenticationFailed.into());
         }
         let hkdf = Hkdf::<Sha256>::new(Some(salt), shared_secret);
         let mut key = [0u8; 32];
-        hkdf.expand(direction.label(), &mut key)
+        hkdf.expand(&direction.subflow_label(index), &mut key)
             .map_err(|_| crypto_err("无法派生会话密钥"))?;
         Self::from_key(&key, shared_secret, max_time_diff_secs)
     }
