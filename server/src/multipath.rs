@@ -35,8 +35,10 @@ const STREAM_CHUNK: usize = 32 * 1024;
 /// 子流发送缓冲上限：禁止内核自动调优把在途字节吞进调度器视野之外
 /// （客户端 reorder 窗口的溢出元凶）。是安全阀，不是流控——设太小会
 /// 压低长 RTT 链路的单子流吞吐（吞吐 ≈ SNDBUF/RTT）。总在途上界
-/// ≈ 子流数 × (SNDBUF + 队列 512KB)，须小于客户端 reorder 窗口。
-const SUBFLOW_SNDBUF: usize = 1024 * 1024;
+/// ≈ 子流数 × (SNDBUF + 队列 512KB)，须小于客户端 reorder 窗口
+/// （8MB）。注意内核对请求值加倍记账（sk_sndbuf = 2×请求值），实际
+/// 传值减半，使最终生效值等于本常量。
+const SUBFLOW_SNDBUF: usize = 1280 * 1024;
 /// 内核写队列中"未真正发出"数据的上限，配合 SNDBUF 限制提前排队。
 const SUBFLOW_NOTSENT_LOWAT: usize = 128 * 1024;
 
@@ -47,7 +49,7 @@ type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 fn cap_subflow_send_buffer(stream: &TcpStream) {
     use socket2::SockRef;
     let sock = SockRef::from(stream);
-    if let Err(err) = sock.set_send_buffer_size(SUBFLOW_SNDBUF) {
+    if let Err(err) = sock.set_send_buffer_size(SUBFLOW_SNDBUF / 2) {
         warn!("subflow set_send_buffer_size failed: {err}");
     }
     set_notsent_lowat(&sock, SUBFLOW_NOTSENT_LOWAT);
