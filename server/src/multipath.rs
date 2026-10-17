@@ -33,8 +33,10 @@ const WRITER_QUEUE: usize = 16;
 /// 每字节调度/加密开销越小，但乱序粒度越粗。
 const STREAM_CHUNK: usize = 32 * 1024;
 /// 子流发送缓冲上限：禁止内核自动调优把在途字节吞进调度器视野之外
-/// （客户端 reorder 窗口的溢出元凶）。是安全阀，不是流控。
-const SUBFLOW_SNDBUF: usize = 256 * 1024;
+/// （客户端 reorder 窗口的溢出元凶）。是安全阀，不是流控——设太小会
+/// 压低长 RTT 链路的单子流吞吐（吞吐 ≈ SNDBUF/RTT）。总在途上界
+/// ≈ 子流数 × (SNDBUF + 队列 512KB)，须小于客户端 reorder 窗口。
+const SUBFLOW_SNDBUF: usize = 1024 * 1024;
 /// 内核写队列中"未真正发出"数据的上限，配合 SNDBUF 限制提前排队。
 const SUBFLOW_NOTSENT_LOWAT: usize = 128 * 1024;
 
