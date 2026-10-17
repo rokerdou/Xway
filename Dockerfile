@@ -9,7 +9,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin proxy
+    && (id -u proxy >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin proxy)
 
 WORKDIR /app
 COPY --from=builder /build/target/release/server /app/server
