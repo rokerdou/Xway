@@ -20,7 +20,7 @@ use tokio::{
     sync::{mpsc, Mutex, watch},
     time::timeout,
 };
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// join 子流等待会话 0 到达、以及会话 0 等待迟到 join 的窗口。
 const JOIN_WINDOW: Duration = Duration::from_secs(2);
@@ -232,28 +232,36 @@ enum Downlink {
 }
 
 fn spawn_subflow_writer(
+    index: u8,
     mut writer: BoxWriter,
     codec: FrameCodec,
     secret_byte: u8,
     mut rx: mpsc::Receiver<Downlink>,
     dead: watch::Sender<bool>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<u64> {
     tokio::spawn(async move {
+        let mut sent = 0u64;
         while let Some(item) = rx.recv().await {
-            let payload = match item {
-                Downlink::Data(payload) => payload,
-                Downlink::Fin(total) => encode_stream_payload(STREAM_FLAG_FIN, total, &[]),
+            let (payload, bytes) = match item {
+                Downlink::Data(payload) => {
+                    let n = payload.len() as u64;
+                    (payload, n)
+                }
+                Downlink::Fin(total) => (encode_stream_payload(STREAM_FLAG_FIN, total, &[]), 0),
             };
             let auth_byte = generate_first_auth_byte(secret_byte);
             if write_encrypted_frame(&mut writer, &codec, &payload, auth_byte, DEFAULT_MAX_PADDING)
                 .await
                 .is_err()
             {
+                warn!("multipath subflow {index} write failed after {sent} bytes");
                 dead.send_replace(true);
                 break;
             }
+            sent += bytes;
         }
         let _ = writer.shutdown().await;
+        sent
     })
 }
 
@@ -261,20 +269,23 @@ fn spawn_subflow_writer(
 /// 子流。任一子流写失败即判定会话死亡（v1 无重传语义）。
 async fn relay_download_striped<R: AsyncRead + Unpin>(
     target_reader: &mut R,
-    writers: Vec<(BoxWriter, FrameCodec)>,
+    writers: Vec<(u8, BoxWriter, FrameCodec)>,
     secret_byte: u8,
     max_payload: usize,
 ) -> anyhow::Result<()> {
     let (dead_tx, mut dead_rx) = watch::channel(false);
     let mut handles = Vec::with_capacity(writers.len());
     let mut senders = Vec::with_capacity(writers.len());
-    for (writer, codec) in writers {
+    let mut indexes = Vec::with_capacity(writers.len());
+    for (index, writer, codec) in writers {
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         senders.push(tx);
-        handles.push(spawn_subflow_writer(writer, codec, secret_byte, rx, dead_tx.clone()));
+        indexes.push(index);
+        handles.push(spawn_subflow_writer(index, writer, codec, secret_byte, rx, dead_tx.clone()));
     }
     drop(dead_tx);
 
+    let started = Instant::now();
     let mut buffer = vec![0u8; max_payload];
     let mut offset: u64 = 0;
     let mut next = 0usize;
@@ -294,7 +305,7 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
                 let payload = encode_stream_payload(0, offset, &buffer[..n]);
                 offset += n as u64;
                 if senders[next].send(Downlink::Data(payload)).await.is_err() {
-                    break Err(anyhow::anyhow!("multipath subflow writer closed"));
+                    break Err(anyhow::anyhow!("multipath subflow {} writer closed", indexes[next]));
                 }
                 next = (next + 1) % count;
             }
@@ -306,8 +317,22 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
         }
     }
     drop(senders);
+    let mut per_subflow = Vec::with_capacity(handles.len());
     for handle in handles {
-        let _ = handle.await;
+        per_subflow.push(handle.await.unwrap_or(0));
+    }
+    match &result {
+        Ok(()) => info!(
+            "multipath download finished: {offset} bytes in {:?} ({} KB/s), per-subflow {:?}",
+            started.elapsed(),
+            offset / 1024 / started.elapsed().as_secs().max(1),
+            indexes.iter().zip(per_subflow.iter()).collect::<Vec<_>>()
+        ),
+        Err(err) => warn!(
+            "multipath download failed at offset {offset} after {:?}: {err} (per-subflow {:?})",
+            started.elapsed(),
+            indexes.iter().zip(per_subflow.iter()).collect::<Vec<_>>()
+        ),
     }
     result
 }
@@ -343,10 +368,10 @@ pub async fn relay_split(
     let (mut target_reader, mut target_writer) = target.into_split();
     let max_payload = config.relay.max_buffer_size.clamp(1024, 16 * 1024);
 
-    let mut writers: Vec<(BoxWriter, FrameCodec)> =
-        vec![(Box::new(client_writer), codecs.outbound)];
+    let mut writers: Vec<(u8, BoxWriter, FrameCodec)> =
+        vec![(0, Box::new(client_writer), codecs.outbound)];
     for subflow in joins {
-        writers.push((Box::new(subflow.stream), subflow.outbound));
+        writers.push((subflow.index, Box::new(subflow.stream), subflow.outbound));
     }
 
     let upload = relay_upload(&mut client_reader, &mut target_writer, &codecs.inbound);

@@ -9,6 +9,7 @@ use shared::{
 };
 use std::{
     collections::HashMap,
+    iter::once,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -203,6 +204,16 @@ async fn handle_client_connection(
     let _ = target_stream.set_nodelay(true);
     if plan.subflows > 1 {
         let secret_byte = config.auth.shared_secret.as_bytes()[0];
+        let indexes: Vec<u8> = once(&0u8)
+            .chain(plan.joins.iter().map(|sf| &sf.index))
+            .copied()
+            .collect();
+        tracing::info!(
+            "multipath session -> {:?}: striping {} subflows {:?}",
+            plan.target,
+            plan.subflows,
+            indexes
+        );
         multipath::relay_split(
             client,
             target_stream,
