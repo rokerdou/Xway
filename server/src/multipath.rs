@@ -9,10 +9,10 @@ use crate::server::SessionCodecs;
 use shared::{
     derive_session_id, encode_stream_payload, generate_first_auth_byte,
     read_encrypted_frame, write_encrypted_frame, FrameCodec, SessionDirection, ConnectResponse,
-    DEFAULT_MAX_PADDING, MAX_SUBFLOWS, SESSION_SALT_LEN, STREAM_FLAG_FIN,
+    CREDIT_FLAG, DEFAULT_MAX_PADDING, MAX_SUBFLOWS, SESSION_SALT_LEN, STREAM_FLAG_FIN,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{
@@ -41,6 +41,12 @@ const STREAM_CHUNK: usize = 32 * 1024;
 const SUBFLOW_SNDBUF: usize = 1280 * 1024;
 /// 内核写队列中"未真正发出"数据的上限，配合 SNDBUF 限制提前排队。
 const SUBFLOW_NOTSENT_LOWAT: usize = 128 * 1024;
+/// credit 流控全局窗口：已入队未消费字节的上界。客户端经 join 子流
+/// 上行周期上报累计消费量（WINDOW_UPDATE），发送循环在此窗口内才继续
+/// 从 target 读取。须小于客户端 reorder 缓冲（8MB）。
+const GLOBAL_WINDOW: u64 = 6 * 1024 * 1024;
+/// WINDOW_UPDATE 载荷：type(1) + consumed(u64 BE)。走 join 子流上行。
+const WINDOW_UPDATE_TYPE: u8 = 0x01;
 
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -96,12 +102,14 @@ pub struct JoinedSubflow {
     pub index: u8,
     stream: TcpStream,
     outbound: FrameCodec,
+    /// join 子流的 c2s 编解码器：握手后用于接收 WINDOW_UPDATE。
+    inbound: FrameCodec,
 }
 
 enum Slot {
     /// 先于会话 0 到达的 join 在此暂存。
     Gathering {
-        joins: HashMap<u8, (TcpStream, FrameCodec)>,
+        joins: HashMap<u8, (TcpStream, FrameCodec, FrameCodec)>,
         created_at: Instant,
     },
     /// 会话 0 已接管；窗口内迟到的 join 经通道转交。
@@ -128,9 +136,12 @@ impl SessionRegistry {
     pub async fn register_join(&self, session_id: [u8; 16], subflow: JoinedSubflow) -> bool {
         let mut map = self.inner.lock().await;
         match map.get_mut(&session_id) {
-            Some(Slot::Gathering { joins, .. }) => {
-                joins.insert(subflow.index, (subflow.stream, subflow.outbound)).is_none()
-            }
+            Some(Slot::Gathering { joins, .. }) => joins
+                .insert(
+                    subflow.index,
+                    (subflow.stream, subflow.outbound, subflow.inbound),
+                )
+                .is_none(),
             Some(Slot::Ready { tx, joined, .. }) => {
                 if joined.contains(&subflow.index) {
                     return false;
@@ -143,7 +154,10 @@ impl SessionRegistry {
                 true
             }
             None => {
-                let joins = HashMap::from([(subflow.index, (subflow.stream, subflow.outbound))]);
+                let joins = HashMap::from([(
+                    subflow.index,
+                    (subflow.stream, subflow.outbound, subflow.inbound),
+                )]);
                 map.insert(
                     session_id,
                     Slot::Gathering {
@@ -166,12 +180,13 @@ impl SessionRegistry {
         let mut collected = Vec::new();
         let mut joined = HashSet::new();
         if let Some(Slot::Gathering { joins, .. }) = map.remove(&session_id) {
-            for (index, (stream, outbound)) in joins {
+            for (index, (stream, outbound, inbound)) in joins {
                 joined.insert(index);
                 collected.push(JoinedSubflow {
                     index,
                     stream,
                     outbound,
+                    inbound,
                 });
             }
         }
@@ -250,6 +265,7 @@ pub async fn handle_join(
         index,
         stream,
         outbound,
+        inbound,
     };
     if !registry.register_join(session_id, subflow).await {
         anyhow::bail!("duplicate or closed subflow index {index}");
@@ -292,6 +308,54 @@ enum Downlink {
     Fin(u64),
 }
 
+/// credit 流控共享状态：客户端上报的累计消费量。锚点是客户端上层
+/// Read() 实际取走的字节（含 readBuf 积压），不是 reorder Expected()，
+/// 因此消费慢直接转化为背压。收到首个 WINDOW_UPDATE 前 enabled=false，
+/// 发送循环盲发（老客户端兼容，SNDBUF 安全阀兜底）。
+struct CreditFlow {
+    consumed: Arc<AtomicU64>,
+    enabled: Arc<AtomicBool>,
+    notify: watch::Receiver<u64>,
+}
+
+/// join 子流上行读循环：解析 WINDOW_UPDATE，推进 consumed（单调取最大）
+/// 并唤醒等待的发送循环。任一 join 上报即生效；读到错误即退出（子流
+/// 死亡由 writer 侧判定会话终结）。
+async fn read_credit_updates<R: AsyncRead + Unpin>(
+    mut reader: R,
+    codec: FrameCodec,
+    consumed: Arc<AtomicU64>,
+    enabled: Arc<AtomicBool>,
+    notify: watch::Sender<u64>,
+) {
+    loop {
+        let frame = match read_encrypted_frame(&mut reader).await {
+            Ok(frame) => frame,
+            Err(_) => return,
+        };
+        let Ok((payload, _)) = codec.decode(&frame) else {
+            return;
+        };
+        if payload.len() == 9 && payload[0] == WINDOW_UPDATE_TYPE {
+            let reported = u64::from_be_bytes(payload[1..].try_into().expect("len checked"));
+            let mut current = consumed.load(Ordering::Acquire);
+            while reported > current {
+                match consumed.compare_exchange_weak(
+                    current,
+                    reported,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => current = actual,
+                }
+            }
+            enabled.store(true, Ordering::Release);
+            let _ = notify.send(reported);
+        }
+    }
+}
+
 fn spawn_subflow_writer(
     index: u8,
     mut writer: BoxWriter,
@@ -330,13 +394,15 @@ fn spawn_subflow_writer(
 
 /// 下行分摊中继：把 target 数据按字节偏移打成流帧，发往队列最空的子流
 /// （最短队列调度）。慢子流队列积压后自动绕开，客户端乱序窗口被限制
-/// 在单子流队列容量内，链路抖动不再冲爆 reorder 缓冲。任一子流写失败
-/// 即判定会话死亡（v1 无重传语义）。
+/// 在单子流队列容量内，链路抖动不再冲爆 reorder 缓冲。credit 启用后
+/// 额外受全局窗口约束（已入队 − 已消费 < GLOBAL_WINDOW）。任一子流写
+/// 失败即判定会话死亡（v1 无重传语义）。
 async fn relay_download_striped<R: AsyncRead + Unpin>(
     target_reader: &mut R,
     writers: Vec<(u8, BoxWriter, FrameCodec)>,
     secret_byte: u8,
     max_payload: usize,
+    mut credit: Option<CreditFlow>,
 ) -> anyhow::Result<()> {
     let (dead_tx, mut dead_rx) = watch::channel(false);
     let mut handles = Vec::with_capacity(writers.len());
@@ -375,6 +441,20 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
                 let n = read?;
                 if n == 0 {
                     break Ok(());
+                }
+                // credit 预算：本帧入队后已入队总量 − 已消费 < GLOBAL_WINDOW。
+                // 首个 WINDOW_UPDATE 到达前 enabled=false，盲发（兼容老
+                // 客户端，SNDBUF 安全阀兜底）。watch 通道全关（join 全死）
+                // 时放弃等待——会话随即被 writer 侧终结。
+                if let Some(credit) = credit.as_mut() {
+                    while credit.enabled.load(Ordering::Acquire)
+                        && offset + n as u64 - credit.consumed.load(Ordering::Acquire)
+                            >= GLOBAL_WINDOW
+                    {
+                        if credit.notify.changed().await.is_err() {
+                            break;
+                        }
+                    }
                 }
                 let payload = encode_stream_payload(0, offset, &buffer[..n]);
                 offset += n as u64;
@@ -438,6 +518,8 @@ pub async fn relay_upload<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// 多路会话中继入口：上行走会话 0 原协议，下行在全部子流间分摊。
+/// join 子流读写两半分离：写半进分摊 writer 池，读半承载客户端的
+/// WINDOW_UPDATE（credit 流控）。
 pub async fn relay_split(
     client: TcpStream,
     target: TcpStream,
@@ -451,9 +533,30 @@ pub async fn relay_split(
 
     let mut writers: Vec<(u8, BoxWriter, FrameCodec)> =
         vec![(0, Box::new(client_writer), codecs.outbound)];
-    for subflow in joins {
-        writers.push((subflow.index, Box::new(subflow.stream), subflow.outbound));
-    }
+    let credit = if joins.is_empty() {
+        None
+    } else {
+        let (notify_tx, notify_rx) = watch::channel(0u64);
+        let consumed = Arc::new(AtomicU64::new(0));
+        let enabled = Arc::new(AtomicBool::new(false));
+        for subflow in joins {
+            let (read_half, write_half) = subflow.stream.into_split();
+            writers.push((subflow.index, Box::new(write_half), subflow.outbound));
+            tokio::spawn(read_credit_updates(
+                read_half,
+                subflow.inbound,
+                consumed.clone(),
+                enabled.clone(),
+                notify_tx.clone(),
+            ));
+        }
+        drop(notify_tx);
+        Some(CreditFlow {
+            consumed,
+            enabled,
+            notify: notify_rx,
+        })
+    };
 
     let upload = relay_upload(&mut client_reader, &mut target_writer, &codecs.inbound);
     let download = relay_download_striped(
@@ -461,12 +564,14 @@ pub async fn relay_split(
         writers,
         secret_byte,
         STREAM_CHUNK,
+        credit,
     );
     tokio::try_join!(upload, download)?;
     Ok(())
 }
 
-/// 生成分摊会话的 ConnectResponse 载荷。
+/// 生成分摊会话的 ConnectResponse 载荷。actual 字节 bit7 置位表示
+/// 服务端支持 credit 流控（老客户端忽略该位）。
 pub fn connect_response_payload(success: bool, subflows: u8) -> Vec<u8> {
     let response = if success {
         ConnectResponse::Success
@@ -474,7 +579,7 @@ pub fn connect_response_payload(success: bool, subflows: u8) -> Vec<u8> {
         ConnectResponse::Failure
     };
     if subflows > 1 {
-        response.encode_multipath(subflows).to_vec()
+        response.encode_multipath(subflows | CREDIT_FLAG).to_vec()
     } else {
         response.encode().to_vec()
     }

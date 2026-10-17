@@ -4,6 +4,9 @@ use crate::{AuthPacket, ProtocolError, Result};
 
 pub const SESSION_SALT_LEN: usize = 32;
 pub const MAX_SUBFLOWS: u8 = 8;
+/// ConnectResponse actual 字节的高位协商位：置 1 表示服务端支持 credit
+/// 流控（客户端可在 join 子流上行发 WINDOW_UPDATE）。
+pub const CREDIT_FLAG: u8 = 0x80;
 
 #[derive(Debug)]
 pub struct ClientHello {
@@ -103,7 +106,7 @@ impl ConnectResponse {
         match bytes {
             [0] | [0, _] => {
                 let subflows = match bytes {
-                    [_, n] if (1..=MAX_SUBFLOWS).contains(n) => *n,
+                    [_, n] if (1..=MAX_SUBFLOWS).contains(&(*n & !CREDIT_FLAG)) => *n & !CREDIT_FLAG,
                     [_] => 1,
                     _ => return Err(ProtocolError::InvalidFormat.into()),
                 };

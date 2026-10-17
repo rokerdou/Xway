@@ -19,7 +19,7 @@ pub use frame::{
     SessionDirection, DEFAULT_MAX_PADDING, MAX_FRAME_BODY_LEN, STREAM_FLAG_FIN,
 };
 pub use protocol::*;
-pub use session::{ClientHello, ConnectResponse, MAX_SUBFLOWS, SESSION_SALT_LEN};
+pub use session::{ClientHello, ConnectResponse, CREDIT_FLAG, MAX_SUBFLOWS, SESSION_SALT_LEN};
 pub use wire_prefix::{
     extract_auth_byte_from_prefix, generate_first_auth_byte, generate_protocol_prefix,
     verify_first_auth_byte, PROTOCOL_PREFIX_TEMPLATE,
