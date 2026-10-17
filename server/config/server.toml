@@ -5,6 +5,7 @@ listen_addr = "0.0.0.0"
 listen_port = 1080
 max_connections = 1000
 timeout_seconds = 300
+handshake_timeout_seconds = 10
 
 [logging]
 level = "info"
@@ -13,7 +14,8 @@ max_log_files = 7
 
 [auth]
 enabled = true
-shared_secret = "my_secret_key_12345"
+# 生产环境通过 XWAY_SHARED_SECRET 注入，至少 16 字节。
+shared_secret = ""
 max_time_diff_secs = 300
 
 [relay]

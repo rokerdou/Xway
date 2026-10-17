@@ -83,7 +83,15 @@ git add . && git commit -m "chore: 更新服务端" && git push
 
 ### 方式 3: dokploy 容器内构建（传统方式）
 
-详见 [DOKPLOY_DEPLOY.md](./DOKPLOY_DEPLOY.md)
+在 Dokploy 中选择源码仓库并使用根目录的 `Dockerfile`。该文件会在构建阶段编译
+Rust 服务端，不会把 `server/` 源码目录误当成可执行文件。必须配置环境变量：
+
+```text
+XWAY_SHARED_SECRET=<至少 16 字节的随机密钥>
+```
+
+预编译发布仓库使用独立的 `Dockerfile.release`，发布 workflow 会将它复制为发布仓库
+中的 `Dockerfile`。不要在源码仓库构建中使用该文件。
 
 ---
 

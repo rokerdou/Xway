@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     };
 
     // 加载配置
-    let config = match config::ServerConfig::from_file(&config_path) {
+    let mut config = match config::ServerConfig::from_file(&config_path) {
         Ok(cfg) => {
             info!("⚙️  配置加载成功: {}", config_path);
             cfg
@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
             config::ServerConfig::default_config()
         }
     };
+    config.apply_env_overrides()?;
 
     info!("🔐 认证配置: enabled={}", config.auth.enabled);
 

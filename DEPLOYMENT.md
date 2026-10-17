@@ -47,11 +47,16 @@ IMAGE_TAG=v1.0.0 PUSH=true ./docker-build.sh
    主机端口: 1080 (或自定义)
    ```
 
-5. **环境变量**（可选）
+5. **环境变量**
    ```
-   RUST_LOG=info
-   SERVER_ADDRESS=0.0.0.0:1080
+    RUST_LOG=info
+    XWAY_SHARED_SECRET=请替换为至少16字节的随机密钥
+    XWAY_LISTEN_ADDR=0.0.0.0
+    XWAY_LISTEN_PORT=1080
    ```
+
+   `XWAY_SHARED_SECRET` 是必填项。源码仓库应使用根目录 `Dockerfile`；预编译发布
+   仓库使用由 CI 生成的 `Dockerfile`，两者不能混用。
 
 6. **部署**
 

@@ -126,4 +126,20 @@ impl ServerConfig {
             },
         }
     }
+
+    /// Apply deployment-time overrides without storing secrets in the image.
+    pub fn apply_env_overrides(&mut self) -> Result<()> {
+        if let Ok(secret) = std::env::var("XWAY_SHARED_SECRET") {
+            self.auth.shared_secret = secret;
+        }
+        if let Ok(address) = std::env::var("XWAY_LISTEN_ADDR") {
+            self.server.listen_addr = address;
+        }
+        if let Ok(port) = std::env::var("XWAY_LISTEN_PORT") {
+            self.server.listen_port = port
+                .parse()
+                .map_err(|_| anyhow::anyhow!("XWAY_LISTEN_PORT 必须是有效端口"))?;
+        }
+        Ok(())
+    }
 }
