@@ -32,15 +32,15 @@ const WRITER_QUEUE: usize = 16;
 /// 下行分摊的读分片大小。独立于单流路径的 max_buffer_size：分片越大，
 /// 每字节调度/加密开销越小，但乱序粒度越粗。
 const STREAM_CHUNK: usize = 32 * 1024;
-/// 子流发送缓冲上限：禁止内核自动调优把在途字节吞进调度器视野之外
-/// （客户端 reorder 窗口的溢出元凶）。是安全阀，不是流控——设太小会
-/// 压低长 RTT 链路的单子流吞吐（吞吐 ≈ SNDBUF/RTT）。总在途上界
-/// ≈ 子流数 × (SNDBUF + 队列 512KB)，须小于客户端 reorder 窗口
-/// （8MB）。注意内核对请求值加倍记账（sk_sndbuf = 2×请求值），实际
-/// 传值减半，使最终生效值等于本常量。
-const SUBFLOW_SNDBUF: usize = 1280 * 1024;
+/// 子流发送缓冲上限：禁止内核自动调优把在途字节吞进调度器视野之外。
+/// credit 流控启用后全局窗口（6MB）先于管道容量生效，SNDBUF 不再是
+/// reorder 溢出的防线，可以放宽换取单子流吞吐（≈ SNDBUF/RTT）；仅在
+/// 老客户端盲发时它兜底总量（此时需 子流数×(SNDBUF+队列) < reorder
+/// 窗口）。注意内核对请求值加倍记账（sk_sndbuf = 2×请求值），实际传值
+/// 减半，使最终生效值等于本常量。
+const SUBFLOW_SNDBUF: usize = 4096 * 1024;
 /// 内核写队列中"未真正发出"数据的上限，配合 SNDBUF 限制提前排队。
-const SUBFLOW_NOTSENT_LOWAT: usize = 128 * 1024;
+const SUBFLOW_NOTSENT_LOWAT: usize = 512 * 1024;
 /// credit 流控全局窗口：已入队未消费字节的上界。客户端经 join 子流
 /// 上行周期上报累计消费量（WINDOW_UPDATE），发送循环在此窗口内才继续
 /// 从 target 读取。须小于客户端 reorder 缓冲（8MB）。
