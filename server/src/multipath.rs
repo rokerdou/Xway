@@ -27,10 +27,65 @@ use tracing::{debug, info, warn};
 const JOIN_WINDOW: Duration = Duration::from_secs(2);
 /// 注册表槽位存活上限（防攻击流量占内存）。
 const SLOT_TTL: Duration = Duration::from_secs(15);
-/// 每条子流的发送队列深度。
-const WRITER_QUEUE: usize = 64;
+/// 每条子流的发送队列深度（帧数）。
+const WRITER_QUEUE: usize = 16;
+/// 下行分摊的读分片大小。独立于单流路径的 max_buffer_size：分片越大，
+/// 每字节调度/加密开销越小，但乱序粒度越粗。
+const STREAM_CHUNK: usize = 32 * 1024;
+/// 子流发送缓冲上限：禁止内核自动调优把在途字节吞进调度器视野之外
+/// （客户端 reorder 窗口的溢出元凶）。是安全阀，不是流控。
+const SUBFLOW_SNDBUF: usize = 256 * 1024;
+/// 内核写队列中"未真正发出"数据的上限，配合 SNDBUF 限制提前排队。
+const SUBFLOW_NOTSENT_LOWAT: usize = 128 * 1024;
 
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// 限制子流发送缓冲并回读验证。手动 setsockopt 会禁用内核自动调优，
+/// 且内核通常对请求值加倍记账——回读值仅用于日志核对。
+fn cap_subflow_send_buffer(stream: &TcpStream) {
+    use socket2::SockRef;
+    let sock = SockRef::from(stream);
+    if let Err(err) = sock.set_send_buffer_size(SUBFLOW_SNDBUF) {
+        warn!("subflow set_send_buffer_size failed: {err}");
+    }
+    set_notsent_lowat(&sock, SUBFLOW_NOTSENT_LOWAT);
+    match sock.send_buffer_size() {
+        Ok(actual) => debug!(
+            "subflow send buffer capped: requested {}KB, kernel {}KB",
+            SUBFLOW_SNDBUF / 1024,
+            actual / 1024
+        ),
+        Err(err) => warn!("subflow send_buffer_size readback failed: {err}"),
+    }
+}
+
+/// TCP_NOTSENT_LOWAT：限制内核写队列中尚未发出的数据量。socket2 0.5
+/// 未封装，直接走 libc；非 Linux 平台跳过（服务端仅部署 Linux）。
+fn set_notsent_lowat(sock: &socket2::SockRef<'_>, lowat: usize) {
+    #[cfg(target_os = "linux")]
+    {
+        const TCP_NOTSENT_LOWAT: i32 = 25;
+        use std::os::fd::{AsFd, AsRawFd};
+        let raw = sock.as_fd().as_raw_fd();
+        let value = lowat as libc::c_uint;
+        let rc = unsafe {
+            libc::setsockopt(
+                raw,
+                libc::IPPROTO_TCP,
+                TCP_NOTSENT_LOWAT,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            warn!("subflow set_notsent_lowat failed: {}", std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (sock, lowat);
+    }
+}
 
 /// 已完成 join 握手、随时可写入的子流。
 pub struct JoinedSubflow {
@@ -162,6 +217,7 @@ pub async fn handle_join(
 ) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
     crate::server::set_tcp_keepalive(&stream).ok();
+    cap_subflow_send_buffer(&stream);
     let secret = config.auth.shared_secret.as_bytes();
     let inbound = FrameCodec::new_subflow(
         secret,
@@ -381,14 +437,13 @@ pub async fn relay_upload<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 pub async fn relay_split(
     client: TcpStream,
     target: TcpStream,
-    config: &ServerConfig,
     codecs: SessionCodecs,
     secret_byte: u8,
     joins: Vec<JoinedSubflow>,
 ) -> anyhow::Result<()> {
+    cap_subflow_send_buffer(&client);
     let (mut client_reader, client_writer) = client.into_split();
     let (mut target_reader, mut target_writer) = target.into_split();
-    let max_payload = config.relay.max_buffer_size.clamp(1024, 16 * 1024);
 
     let mut writers: Vec<(u8, BoxWriter, FrameCodec)> =
         vec![(0, Box::new(client_writer), codecs.outbound)];
@@ -401,7 +456,7 @@ pub async fn relay_split(
         &mut target_reader,
         writers,
         secret_byte,
-        max_payload,
+        STREAM_CHUNK,
     );
     tokio::try_join!(upload, download)?;
     Ok(())

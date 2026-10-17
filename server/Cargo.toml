@@ -27,3 +27,4 @@ anyhow = { workspace = true }
 
 # 网络
 socket2 = "0.5"
+libc = "0.2"

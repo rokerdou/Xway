@@ -217,7 +217,6 @@ async fn handle_client_connection(
         multipath::relay_split(
             client,
             target_stream,
-            &config,
             plan.codecs,
             secret_byte,
             plan.joins,

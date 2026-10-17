@@ -3461,6 +3461,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "shared",
  "socket2 0.5.10",
