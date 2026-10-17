@@ -91,6 +91,9 @@ async fn handle_client_connection(
     defense: Arc<DefenseManager>,
 ) -> anyhow::Result<()> {
     let client_ip = client_addr.ip();
+    // Nagle holds the tail segment of every frame until the previous frame is
+    // ACKed, capping throughput at frame_size/RTT (~17KB/s on a 240ms path).
+    let _ = client.set_nodelay(true);
     if config.server.enable_ip_ban && defense.is_banned(client_ip).await {
         anyhow::bail!("IP is temporarily banned");
     }
@@ -144,6 +147,8 @@ async fn handle_client_connection(
         auth_byte,
     )
     .await?;
+    // Upload direction stalls the same way as the client leg (see above).
+    let _ = target_stream.set_nodelay(true);
     relay_with_encryption(client, target_stream, &config, codecs).await?;
     Ok(())
 }

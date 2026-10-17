@@ -1,5 +1,6 @@
 [workspace]
 members = ["server", "client", "shared", "client-core", "client-gui/src-tauri"]
+exclude = ["clash-verge-service-ipc", "verge-xway", "mihomo-xway"]
 resolver = "2"
 
 [workspace.package]
