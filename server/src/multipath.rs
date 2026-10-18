@@ -318,6 +318,13 @@ struct CreditFlow {
     notify: watch::Receiver<u64>,
 }
 
+/// credit 流控等待统计：累计阻塞时长与发生次数。
+#[derive(Default)]
+struct CreditStats {
+    wait: Duration,
+    stalls: u64,
+}
+
 /// join 子流上行读循环：解析 WINDOW_UPDATE，推进 consumed（单调取最大）
 /// 并唤醒等待的发送循环。任一 join 上报即生效；读到错误即退出（子流
 /// 死亡由 writer 侧判定会话终结）。
@@ -403,6 +410,8 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
     secret_byte: u8,
     max_payload: usize,
     mut credit: Option<CreditFlow>,
+    session_id: [u8; 16],
+    upload_closed: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let (dead_tx, mut dead_rx) = watch::channel(false);
     let mut handles = Vec::with_capacity(writers.len());
@@ -428,6 +437,7 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
     drop(dead_tx);
 
     let started = Instant::now();
+    let mut credit_stats = CreditStats::default();
     let mut buffer = vec![0u8; max_payload];
     let mut offset: u64 = 0;
     let result = loop {
@@ -447,13 +457,20 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
                 // 客户端，SNDBUF 安全阀兜底）。watch 通道全关（join 全死）
                 // 时放弃等待——会话随即被 writer 侧终结。
                 if let Some(credit) = credit.as_mut() {
+                    let wait_start = Instant::now();
+                    let mut stalled = false;
                     while credit.enabled.load(Ordering::Acquire)
                         && offset + n as u64 - credit.consumed.load(Ordering::Acquire)
                             >= GLOBAL_WINDOW
                     {
+                        stalled = true;
                         if credit.notify.changed().await.is_err() {
                             break;
                         }
+                    }
+                    if stalled {
+                        credit_stats.wait += wait_start.elapsed();
+                        credit_stats.stalls += 1;
                     }
                 }
                 let payload = encode_stream_payload(0, offset, &buffer[..n]);
@@ -483,16 +500,22 @@ async fn relay_download_striped<R: AsyncRead + Unpin>(
     for handle in handles {
         per_subflow.push(handle.await.unwrap_or(0));
     }
+    let sid = hex(&session_id);
+    let client_closed = upload_closed.load(Ordering::Acquire);
     match &result {
         Ok(()) => info!(
-            "multipath download finished: {offset} bytes in {:?} ({} KB/s), per-subflow {:?}",
+            "multipath download finished [{sid}]: {offset} bytes in {:?} ({} KB/s), credit_wait {:?}/{}x, client_closed={client_closed}, per-subflow {:?}",
             started.elapsed(),
             offset / 1024 / started.elapsed().as_secs().max(1),
+            credit_stats.wait,
+            credit_stats.stalls,
             indexes.iter().zip(per_subflow.iter()).collect::<Vec<_>>()
         ),
         Err(err) => warn!(
-            "multipath download failed at offset {offset} after {:?}: {err} (per-subflow {:?})",
+            "multipath download failed [{sid}] at offset {offset} after {:?}: {err} (credit_wait {:?}/{}x, client_closed={client_closed}, per-subflow {:?})",
             started.elapsed(),
+            credit_stats.wait,
+            credit_stats.stalls,
             indexes.iter().zip(per_subflow.iter()).collect::<Vec<_>>()
         ),
     }
@@ -519,12 +542,14 @@ pub async fn relay_upload<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
 /// 多路会话中继入口：上行走会话 0 原协议，下行在全部子流间分摊。
 /// join 子流读写两半分离：写半进分摊 writer 池，读半承载客户端的
-/// WINDOW_UPDATE（credit 流控）。
+/// WINDOW_UPDATE（credit 流控）。upload 先于 download 结束（客户端
+/// 半关或主动断开）时 upload_closed 置位，结束日志据此刻区分谁先关。
 pub async fn relay_split(
     client: TcpStream,
     target: TcpStream,
     codecs: SessionCodecs,
     secret_byte: u8,
+    session_id: [u8; 16],
     joins: Vec<JoinedSubflow>,
 ) -> anyhow::Result<()> {
     cap_subflow_send_buffer(&client);
@@ -558,13 +583,21 @@ pub async fn relay_split(
         })
     };
 
-    let upload = relay_upload(&mut client_reader, &mut target_writer, &codecs.inbound);
+    let upload_closed = Arc::new(AtomicBool::new(false));
+    let upload_flag = upload_closed.clone();
+    let upload = async move {
+        let result = relay_upload(&mut client_reader, &mut target_writer, &codecs.inbound).await;
+        upload_flag.store(true, Ordering::Release);
+        result
+    };
     let download = relay_download_striped(
         &mut target_reader,
         writers,
         secret_byte,
         STREAM_CHUNK,
         credit,
+        session_id,
+        upload_closed,
     );
     tokio::try_join!(upload, download)?;
     Ok(())
@@ -586,7 +619,7 @@ pub fn connect_response_payload(success: bool, subflows: u8) -> Vec<u8> {
 }
 
 /// 解码 hex 用于日志（16 字节会话 ID）。
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

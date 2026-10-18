@@ -314,7 +314,7 @@ async fn handle_local_connection(
 
     let codecs = establish_session(&mut remote_stream, &target_addr, &config).await?;
     let response = read_payload(&mut remote_stream, &codecs.download).await?;
-    if ConnectResponse::decode(&response)? != ConnectResponse::Success {
+    if ConnectResponse::decode(&response)?.0 != ConnectResponse::Success {
         send_socks5_response(&mut local_stream, 0x05).await?;
         anyhow::bail!("remote server could not connect to target");
     }

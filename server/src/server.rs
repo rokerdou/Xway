@@ -107,6 +107,9 @@ struct SessionPlan {
     /// 服务端确认的子流总数（1 = 单流，走原有路径）。
     subflows: u8,
     joins: Vec<multipath::JoinedSubflow>,
+    /// 多路会话注册键；单流路径为 None。HMAC(secret, salt)[..16]，
+    /// 客户端按同一算法计算，用于两端日志关联。
+    session_id: Option<[u8; 16]>,
 }
 
 async fn handle_client_connection(
@@ -208,8 +211,12 @@ async fn handle_client_connection(
             .chain(plan.joins.iter().map(|sf| &sf.index))
             .copied()
             .collect();
+        let session_id = plan
+            .session_id
+            .expect("multipath session has a session id");
         tracing::info!(
-            "multipath session -> {:?}: striping {} subflows {:?}",
+            "multipath session [{}] -> {:?}: striping {} subflows {:?}",
+            multipath::hex(&session_id),
             plan.target,
             plan.subflows,
             indexes
@@ -219,6 +226,7 @@ async fn handle_client_connection(
             target_stream,
             plan.codecs,
             secret_byte,
+            session_id,
             plan.joins,
         )
         .await?;
@@ -282,17 +290,19 @@ async fn session_handshake(
     let actual = hello
         .subflows
         .clamp(1, config.server.max_subflows.max(1));
-    let joins = if actual > 1 {
+    let (joins, session_id) = if actual > 1 {
         let session_id = derive_session_id(config.auth.shared_secret.as_bytes(), &salt)?;
-        multipath::collect_subflows(registry, session_id, actual).await
+        let joins = multipath::collect_subflows(registry, session_id, actual).await;
+        (joins, Some(session_id))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     Ok(SessionPlan {
         target,
         codecs: SessionCodecs { inbound, outbound },
         subflows: actual,
         joins,
+        session_id,
     })
 }
 
